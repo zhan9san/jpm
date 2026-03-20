@@ -33,6 +33,13 @@ or build from source (Rust 1.75+):
 cargo install --path .
 ```
 
+**macOS:** Gatekeeper will block the downloaded binary as unnotarized. Remove the
+quarantine flag after download:
+
+```bash
+xattr -d com.apple.quarantine jpm
+```
+
 ## Usage
 
 ```bash
