@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<project>
+  <build>
+    <plugins>
+      <plugin>
+        <configuration>
+          <artifactItems>
+            <artifactItem>
+              <artifactId>mailer</artifactId>
+              <version>472.vf7c289a_4b_c36</version>
+              <type>hpi</type>
+            </artifactItem>
+          </artifactItems>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

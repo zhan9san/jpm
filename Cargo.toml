@@ -3,6 +3,7 @@ name = "jpm"
 version = "0.1.0"
 edition = "2021"
 description = "Jenkins Plugin Manager - generates reproducible plugin lock files"
+license = "MIT"
 
 [[bin]]
 name = "jpm"
@@ -27,3 +28,7 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+assert_cmd = "2.2.0"
+wiremock = "0.6.5"

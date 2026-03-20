@@ -25,15 +25,23 @@ impl UpdateCenter {
         let cache_dir = cache_dir();
         tokio::fs::create_dir_all(&cache_dir).await?;
 
-        let stable_url = format!("{UC_STABLE_URL}{jenkins_version}");
+        // Allow test / mirror overrides via environment variables.
+        let stable_base =
+            std::env::var("JPM_UC_STABLE_URL").unwrap_or_else(|_| UC_STABLE_URL.to_string());
+        let experimental_url = std::env::var("JPM_UC_EXPERIMENTAL_URL")
+            .unwrap_or_else(|_| UC_EXPERIMENTAL_URL.to_string());
+        let plugin_versions_url = std::env::var("JPM_UC_PLUGIN_VERSIONS_URL")
+            .unwrap_or_else(|_| UC_PLUGIN_VERSIONS_URL.to_string());
+
+        let stable_url = format!("{stable_base}{jenkins_version}");
         let stable_cache = cache_dir.join(format!("uc-{jenkins_version}.json"));
         let experimental_cache = cache_dir.join("uc-experimental.json");
         let plugin_versions_cache = cache_dir.join("plugin-versions.json");
 
         let (stable, experimental, plugin_versions) = tokio::try_join!(
             fetch_json(client, &stable_url, &stable_cache),
-            fetch_json(client, UC_EXPERIMENTAL_URL, &experimental_cache),
-            fetch_json(client, UC_PLUGIN_VERSIONS_URL, &plugin_versions_cache),
+            fetch_json(client, &experimental_url, &experimental_cache),
+            fetch_json(client, &plugin_versions_url, &plugin_versions_cache),
         )
         .context("fetching Update Center endpoints")?;
 
@@ -233,6 +241,9 @@ async fn try_load_cache(path: &Path) -> Option<Value> {
 }
 
 fn cache_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("JPM_CACHE_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
     dirs::cache_dir()
         .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
         .join("jpm")

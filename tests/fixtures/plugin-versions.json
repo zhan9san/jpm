@@ -1,0 +1,61 @@
+{
+  "plugins": {
+    "git": {
+      "5.9.0": {
+        "requiredCore": "2.504.3",
+        "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "dependencies": [
+          {"name": "credentials", "version": "1453.v9b_a_29777a_b_fd", "optional": false}
+        ]
+      },
+      "5.7.0": {
+        "requiredCore": "2.440.3",
+        "sha256": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+        "dependencies": [
+          {"name": "credentials", "version": "1453.v9b_a_29777a_b_fd", "optional": false}
+        ]
+      },
+      "5.5.0": {
+        "requiredCore": "2.387.3",
+        "sha256": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=",
+        "dependencies": [
+          {"name": "credentials", "version": "1371.0", "optional": false}
+        ]
+      }
+    },
+    "credentials": {
+      "1453.v9b_a_29777a_b_fd": {
+        "requiredCore": "2.387.3",
+        "sha256": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD=",
+        "dependencies": []
+      },
+      "1371.0": {
+        "requiredCore": "2.361.4",
+        "sha256": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE=",
+        "dependencies": []
+      }
+    },
+    "mailer": {
+      "472.vf7c289a_4b_c36": {
+        "requiredCore": "2.361.4",
+        "sha256": "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=",
+        "dependencies": []
+      },
+      "300.0": {
+        "requiredCore": "2.222.1",
+        "sha256": "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH=",
+        "dependencies": []
+      }
+    },
+    "workflow-aggregator": {
+      "596.v8c21c963d92d": {
+        "requiredCore": "2.387.3",
+        "sha256": "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG=",
+        "dependencies": [
+          {"name": "credentials", "version": "1371.0", "optional": false},
+          {"name": "git", "version": "5.2.0", "optional": false}
+        ]
+      }
+    }
+  }
+}
