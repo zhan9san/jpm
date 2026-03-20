@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use std::collections::HashMap;
 
 /// The version specifier for a requested plugin.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,16 +83,119 @@ pub fn parse_plugins_txt(content: &str) -> Result<Vec<PluginRequest>> {
     Ok(plugins)
 }
 
-fn strip_comment(s: &str) -> &str {
-    match s.find('#') {
-        Some(i) => &s[..i],
-        None => s,
+/// Rewrite `content` (a `plugins.txt` string) replacing the version of any
+/// plugin listed in `updates` with the corresponding new version string.
+///
+/// - Blank lines and comment-only lines are preserved verbatim.
+/// - Inline comments are preserved on the same line.
+/// - The URL field (3rd colon-separated part) is preserved if present.
+/// - A trailing newline is preserved if the original had one.
+pub fn rewrite_versions(content: &str, updates: &HashMap<String, String>) -> String {
+    let mut out: Vec<String> = Vec::new();
+
+    for raw in content.lines() {
+        let (code, comment) = split_code_comment(raw);
+        let trimmed = code.trim();
+
+        if trimmed.is_empty() {
+            out.push(raw.to_string());
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.splitn(3, ':').collect();
+        let name = parts[0].trim();
+
+        match updates.get(name) {
+            None => out.push(raw.to_string()),
+            Some(new_version) => {
+                let url_part = parts.get(2).map(|s| s.trim()).filter(|s| !s.is_empty());
+                let new_code = match url_part {
+                    Some(url) => format!("{name}:{new_version}:{url}"),
+                    None => format!("{name}:{new_version}"),
+                };
+                if comment.is_empty() {
+                    out.push(new_code);
+                } else {
+                    out.push(format!("{new_code}  {comment}"));
+                }
+            }
+        }
     }
+
+    let joined = out.join("\n");
+    if content.ends_with('\n') {
+        joined + "\n"
+    } else {
+        joined
+    }
+}
+
+fn split_code_comment(s: &str) -> (&str, &str) {
+    match s.find('#') {
+        Some(i) => (&s[..i], &s[i..]),
+        None => (s, ""),
+    }
+}
+
+fn strip_comment(s: &str) -> &str {
+    split_code_comment(s).0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewrite_replaces_pinned_version() {
+        let content = "git:4.0.0\ncredentials:1371.0\n";
+        let updates = HashMap::from([("git".to_string(), "5.5.0".to_string())]);
+        let result = rewrite_versions(content, &updates);
+        assert_eq!(result, "git:5.5.0\ncredentials:1371.0\n");
+    }
+
+    #[test]
+    fn rewrite_preserves_comments_and_blank_lines() {
+        let content = "# header\ngit:4.0.0  # inline\n\ncredentials:latest\n";
+        let updates = HashMap::from([("git".to_string(), "5.5.0".to_string())]);
+        let result = rewrite_versions(content, &updates);
+        assert_eq!(
+            result,
+            "# header\ngit:5.5.0  # inline\n\ncredentials:latest\n"
+        );
+    }
+
+    #[test]
+    fn rewrite_preserves_url_field() {
+        let content = "git:4.0.0:http://mirror.example.com/git.hpi\n";
+        let updates = HashMap::from([("git".to_string(), "5.5.0".to_string())]);
+        let result = rewrite_versions(content, &updates);
+        assert_eq!(result, "git:5.5.0:http://mirror.example.com/git.hpi\n");
+    }
+
+    #[test]
+    fn rewrite_handles_latest_entry() {
+        let content = "git:latest\n";
+        let updates = HashMap::from([("git".to_string(), "5.5.0".to_string())]);
+        let result = rewrite_versions(content, &updates);
+        assert_eq!(result, "git:5.5.0\n");
+    }
+
+    #[test]
+    fn rewrite_leaves_non_updated_plugins_unchanged() {
+        let content = "git:4.0.0\nmailer:1.0.0\n";
+        let updates = HashMap::from([("git".to_string(), "5.5.0".to_string())]);
+        let result = rewrite_versions(content, &updates);
+        assert_eq!(result, "git:5.5.0\nmailer:1.0.0\n");
+    }
+
+    #[test]
+    fn rewrite_preserves_trailing_newline() {
+        let with_newline = "git:4.0.0\n";
+        let without_newline = "git:4.0.0";
+        let updates = HashMap::from([("git".to_string(), "5.5.0".to_string())]);
+        assert!(rewrite_versions(with_newline, &updates).ends_with('\n'));
+        assert!(!rewrite_versions(without_newline, &updates).ends_with('\n'));
+    }
 
     #[test]
     fn parses_various_formats() {

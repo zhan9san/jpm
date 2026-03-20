@@ -43,9 +43,15 @@ xattr -d com.apple.quarantine jpm
 ## Usage
 
 ```bash
-jpm lock    -j <VERSION> [-f plugins.txt] [-o plugins-lock.txt]
+jpm lock    -j <VERSION> [-f plugins.txt] [-o plugins-lock.txt] [--fix] [--upgrade]
 jpm install [-l plugins-lock.txt] [-d ./plugins/] [--dry-run] [--skip-failed]
 ```
+
+| Situation | Command |
+|---|---|
+| Initial setup or routine update | `jpm lock -j <VERSION>` |
+| Jenkins upgrade breaks plugins | `jpm lock -j <VERSION> --fix` |
+| Annual Jenkins + plugin refresh | `jpm lock -j <VERSION> --fix --upgrade` |
 
 ### `plugins.txt`
 
