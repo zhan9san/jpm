@@ -58,9 +58,7 @@ fn compare_dot_segments(a: &str, b: &str) -> std::cmp::Ordering {
 /// `vf91669a32e45` → `[Str("v"), Num(91669), Str("a"), Num(32), Str("e"), Num(45)]`
 /// and `525` → `[Num(525)]`.
 fn dot_segments(v: &str) -> Vec<Segment> {
-    v.split('.')
-        .flat_map(split_numeric_alpha)
-        .collect()
+    v.split('.').flat_map(split_numeric_alpha).collect()
 }
 
 fn split_numeric_alpha(s: &str) -> Vec<Segment> {
@@ -69,7 +67,11 @@ fn split_numeric_alpha(s: &str) -> Vec<Segment> {
     }
     let mut result = Vec::new();
     let mut buf = String::new();
-    let mut is_numeric = s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+    let mut is_numeric = s
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false);
 
     for c in s.chars() {
         let c_numeric = c.is_ascii_digit();

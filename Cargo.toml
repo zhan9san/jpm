@@ -21,3 +21,9 @@ sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 zip = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

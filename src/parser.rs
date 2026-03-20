@@ -34,7 +34,6 @@ pub struct PluginRequest {
     pub url: Option<String>,
 }
 
-
 /// Parse the contents of a `plugins.txt` file into a list of plugin requests.
 ///
 /// Format per line (after stripping inline `#` comments and blank lines):
@@ -127,7 +126,9 @@ docker # inline comment
         );
 
         assert_eq!(plugins[5].name, "credentials");
-        assert!(matches!(&plugins[5].version, VersionSpec::Pinned(v) if v == "1415.v831096eb_5534"));
+        assert!(
+            matches!(&plugins[5].version, VersionSpec::Pinned(v) if v == "1415.v831096eb_5534")
+        );
         assert_eq!(
             plugins[5].url.as_deref(),
             Some("http://override.example.com/cred.hpi")
