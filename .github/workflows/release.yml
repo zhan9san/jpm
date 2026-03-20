@@ -93,11 +93,8 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           ARCHIVE="jpm-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
-          tar -czf "$ARCHIVE" \
-            -C "target/${{ matrix.target }}/release" jpm \
-            README.md
+          tar -czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" jpm
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       # ── Package: Windows (.zip) ──────────────────────────────────────────
       - name: Package (Windows)
@@ -105,12 +102,9 @@ jobs:
         shell: pwsh
         run: |
           $archive = "jpm-${{ github.ref_name }}-${{ matrix.target }}.zip"
-          Compress-Archive `
-            -Path "target\${{ matrix.target }}\release\jpm.exe", "README.md" `
-            -DestinationPath $archive
+          Compress-Archive -Path "target\${{ matrix.target }}\release\jpm.exe" -DestinationPath $archive
           $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
           "$hash  $archive" | Out-File -Encoding ASCII "${archive}.sha256"
-          echo "ARCHIVE=$archive" | Out-File -Append -Encoding ASCII $env:GITHUB_ENV
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -129,8 +123,6 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -143,6 +135,11 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/**
+          working_directory: dist
+          files: |
+            *.tar.gz
+            *.zip
+            *.sha256
           generate_release_notes: true
+          make_latest: "true"
           fail_on_unmatched_files: true
