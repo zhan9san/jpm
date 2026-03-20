@@ -1,0 +1,30 @@
+{
+  "id": "default",
+  "plugins": {
+    "git": {
+      "name": "git",
+      "version": "5.7.0",
+      "dependencies": [
+        {"name": "credentials", "version": "1371.0", "optional": false}
+      ]
+    },
+    "credentials": {
+      "name": "credentials",
+      "version": "1453.v9b_a_29777a_b_fd",
+      "dependencies": []
+    },
+    "mailer": {
+      "name": "mailer",
+      "version": "472.vf7c289a_4b_c36",
+      "dependencies": []
+    },
+    "workflow-aggregator": {
+      "name": "workflow-aggregator",
+      "version": "596.v8c21c963d92d",
+      "dependencies": [
+        {"name": "credentials", "version": "1371.0", "optional": false},
+        {"name": "git", "version": "5.2.0", "optional": false}
+      ]
+    }
+  }
+}

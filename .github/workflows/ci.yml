@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly smoke test against the live Jenkins Update Center (Monday 06:00 UTC).
+    - cron: "0 6 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -72,3 +75,34 @@ jobs:
 
       - name: Lint markdown
         run: npx --yes markdownlint-cli "docs/**/*.md" "README.md"
+
+  # ── Weekly smoke test (live UC) ────────────────────────────────────────────
+  # Runs only on the weekly schedule — not on push/PR — so a live UC outage or
+  # API change is caught without blocking developer workflows.
+  smoke:
+    name: Smoke test (live UC)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Run jpm lock against live Update Center
+        run: |
+          ./target/debug/jpm lock \
+            -j 2.452.4 \
+            -f sample/plugins.txt \
+            -o /tmp/smoke-lock.txt \
+            --skip-bundled
+          echo "--- Lock file ---"
+          cat /tmp/smoke-lock.txt
+          plugin_count=$(grep -c '^[^#]' /tmp/smoke-lock.txt || true)
+          echo "Resolved ${plugin_count} plugin(s)"
+          [ "$plugin_count" -gt 0 ]

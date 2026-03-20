@@ -13,9 +13,13 @@ pub async fn fetch_bundled_plugins(
     client: &reqwest::Client,
     jenkins_version: &str,
 ) -> Result<HashMap<String, String>> {
-    let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-        .join("jpm");
+    let cache_dir = if let Ok(dir) = std::env::var("JPM_CACHE_DIR") {
+        std::path::PathBuf::from(dir)
+    } else {
+        dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
+            .join("jpm")
+    };
     tokio::fs::create_dir_all(&cache_dir).await?;
 
     let cache_path = cache_dir.join(format!("pom-{jenkins_version}.xml"));
@@ -23,9 +27,10 @@ pub async fn fetch_bundled_plugins(
     let xml = if let Some(cached) = try_load_cached_xml(&cache_path).await {
         cached
     } else {
-        let url = format!(
-            "https://raw.githubusercontent.com/jenkinsci/jenkins/jenkins-{jenkins_version}/war/pom.xml"
-        );
+        let pom_base = std::env::var("JPM_POM_BASE_URL").unwrap_or_else(|_| {
+            "https://raw.githubusercontent.com/jenkinsci/jenkins/jenkins-".to_string()
+        });
+        let url = format!("{pom_base}{jenkins_version}/war/pom.xml");
         eprintln!("  fetching bundled plugins from {url}");
         let text = client
             .get(&url)

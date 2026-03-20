@@ -1,5 +1,9 @@
 # jpm — Jenkins Plugin Manager
 
+[![CI](https://github.com/zhan9san/jpm/actions/workflows/ci.yml/badge.svg)](https://github.com/zhan9san/jpm/actions/workflows/ci.yml)
+[![Release](https://github.com/zhan9san/jpm/actions/workflows/release.yml/badge.svg)](https://github.com/zhan9san/jpm/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Jenkins has never had a proper package manager. Teams copy-paste plugin lists,
 get bitten by transitive dependency conflicts, and can't reproduce builds.
 **jpm** brings the `Cargo.lock` model to Jenkins plugins.
