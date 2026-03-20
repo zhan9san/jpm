@@ -4,6 +4,16 @@ use crate::parser::{PluginRequest, VersionSpec};
 use crate::update_center::UpdateCenter;
 use crate::version::JenkinsVersion;
 
+/// A plugin whose resolved version is incompatible with the target Jenkins.
+#[derive(Debug, Clone)]
+pub struct CompatIssue {
+    pub name: String,
+    pub version: String,
+    pub required_core: String,
+    /// Highest version of this plugin whose `requiredCore` ≤ target, if any.
+    pub suggestion: Option<String>,
+}
+
 /// A fully resolved plugin with its exact pinned version.
 #[derive(Debug, Clone)]
 pub struct ResolvedPlugin {
@@ -51,6 +61,16 @@ pub fn resolve(
     let mut resolved: HashMap<String, ResolvedPlugin> = HashMap::new();
     let mut queue: VecDeque<QueueEntry> = VecDeque::new();
 
+    // Track which plugins were explicitly pinned in plugins.txt so we can warn
+    // when a transitive dependency forces an upgrade past the pin.
+    let direct_pins: HashMap<String, String> = requests
+        .iter()
+        .filter_map(|r| match &r.version {
+            VersionSpec::Pinned(v) => Some((r.name.clone(), v.clone())),
+            _ => None,
+        })
+        .collect();
+
     // Seed from the explicit requests.
     for req in requests {
         let (version, channel) = match resolve_version(req, uc) {
@@ -78,6 +98,15 @@ pub fn resolve(
             let existing_ver = JenkinsVersion::new(&existing.version);
             if new_ver <= existing_ver {
                 continue;
+            }
+            // Warn when a transitive dep overrides an explicit pin from plugins.txt.
+            if existing.is_direct {
+                if let Some(pinned_ver) = direct_pins.get(&entry.name) {
+                    eprintln!(
+                        "  warning: {} pinned to {} in plugins.txt but upgraded to {}",
+                        entry.name, pinned_ver, entry.version
+                    );
+                }
             }
             eprintln!(
                 "  upgrading {} {} → {} (conflict resolution)",
@@ -128,6 +157,35 @@ pub fn resolve(
     resolved
 }
 
+/// Check every resolved plugin against the target Jenkins version.
+///
+/// Returns a list of `CompatIssue`s for plugins whose `requiredCore` exceeds
+/// the target. Each issue includes the highest compatible version, if one exists.
+pub fn check_compat(
+    resolved: &HashMap<String, ResolvedPlugin>,
+    uc: &UpdateCenter,
+    jenkins_version: &str,
+) -> Vec<CompatIssue> {
+    let target = JenkinsVersion::new(jenkins_version);
+    let mut issues: Vec<CompatIssue> = resolved
+        .values()
+        .filter_map(|plugin| {
+            let rc = uc.required_core_for(&plugin.name, &plugin.version)?;
+            if JenkinsVersion::new(rc) <= target {
+                return None;
+            }
+            Some(CompatIssue {
+                name: plugin.name.clone(),
+                version: plugin.version.clone(),
+                required_core: rc.to_owned(),
+                suggestion: uc.highest_compatible_version(&plugin.name, &target),
+            })
+        })
+        .collect();
+    issues.sort_by(|a, b| a.name.cmp(&b.name));
+    issues
+}
+
 /// Resolve a `VersionSpec` into an actual version string and channel.
 fn resolve_version(req: &PluginRequest, uc: &UpdateCenter) -> Option<(String, Channel)> {
     match &req.version {
@@ -146,5 +204,103 @@ fn resolve_version(req: &PluginRequest, uc: &UpdateCenter) -> Option<(String, Ch
             }
         }
         VersionSpec::Pinned(v) => Some((v.clone(), Channel::Pinned)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_uc_for_compat(plugin_versions: serde_json::Value) -> UpdateCenter {
+        UpdateCenter {
+            stable: json!({}),
+            experimental: json!({}),
+            plugin_versions,
+        }
+    }
+
+    fn resolved_plugin(name: &str, version: &str) -> ResolvedPlugin {
+        ResolvedPlugin {
+            name: name.to_string(),
+            version: version.to_string(),
+            sha256: None,
+            is_direct: true,
+        }
+    }
+
+    #[test]
+    fn check_compat_no_issues() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": { "git": { "5.5.0": { "requiredCore": "2.440.3" } } }
+        }));
+        let resolved = HashMap::from([("git".to_string(), resolved_plugin("git", "5.5.0"))]);
+        let issues = check_compat(&resolved, &uc, "2.452.4");
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn check_compat_detects_incompatible_plugin() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "git": {
+                    "5.5.0": { "requiredCore": "2.440.3" },
+                    "5.9.0": { "requiredCore": "2.504.3" }
+                }
+            }
+        }));
+        // git:5.9.0 requires Jenkins 2.504.3, but target is 2.452.4.
+        let resolved = HashMap::from([("git".to_string(), resolved_plugin("git", "5.9.0"))]);
+        let issues = check_compat(&resolved, &uc, "2.452.4");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].name, "git");
+        assert_eq!(issues[0].version, "5.9.0");
+        assert_eq!(issues[0].required_core, "2.504.3");
+        assert_eq!(issues[0].suggestion.as_deref(), Some("5.5.0"));
+    }
+
+    #[test]
+    fn check_compat_no_suggestion_when_all_incompatible() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "git": { "5.9.0": { "requiredCore": "2.504.3" } }
+            }
+        }));
+        let resolved = HashMap::from([("git".to_string(), resolved_plugin("git", "5.9.0"))]);
+        let issues = check_compat(&resolved, &uc, "2.387.3");
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].suggestion, None);
+    }
+
+    #[test]
+    fn check_compat_skips_missing_required_core() {
+        // Plugin entry has no requiredCore field → treated as compatible.
+        let uc = make_uc_for_compat(json!({
+            "plugins": { "git": { "5.5.0": {} } }
+        }));
+        let resolved = HashMap::from([("git".to_string(), resolved_plugin("git", "5.5.0"))]);
+        let issues = check_compat(&resolved, &uc, "2.100.0");
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn check_compat_multiple_issues_sorted() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "mailer":      { "1.0.0": { "requiredCore": "2.504.3" } },
+                "credentials": { "2.0.0": { "requiredCore": "2.504.3" } }
+            }
+        }));
+        let resolved = HashMap::from([
+            ("mailer".to_string(), resolved_plugin("mailer", "1.0.0")),
+            (
+                "credentials".to_string(),
+                resolved_plugin("credentials", "2.0.0"),
+            ),
+        ]);
+        let issues = check_compat(&resolved, &uc, "2.387.3");
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].name, "credentials");
+        assert_eq!(issues[1].name, "mailer");
     }
 }

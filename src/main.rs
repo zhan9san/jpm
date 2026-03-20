@@ -11,6 +11,8 @@ use clap::{Args, Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use version::JenkinsVersion;
+
 /// Jenkins Plugin Manager — reproducible plugin management for Jenkins.
 #[derive(Parser, Debug)]
 #[command(name = "jpm", version, about, long_about = None)]
@@ -52,6 +54,16 @@ struct LockArgs {
     /// Faster, but may include plugins that are already bundled in the WAR.
     #[arg(long)]
     skip_bundled: bool,
+
+    /// Rewrite plugins.txt, replacing versions of incompatible plugins with
+    /// the highest version whose `requiredCore` ≤ `--jenkins-version`.
+    #[arg(long)]
+    fix: bool,
+
+    /// Rewrite plugins.txt, replacing ALL pinned versions with the highest
+    /// version whose `requiredCore` ≤ `--jenkins-version` (superset of --fix).
+    #[arg(long)]
+    upgrade: bool,
 }
 
 // ── jpm install ───────────────────────────────────────────────────────────────
@@ -104,7 +116,7 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
 
     let manifest_text = std::fs::read_to_string(&args.plugin_file)
         .with_context(|| format!("reading manifest '{}'", args.plugin_file.display()))?;
-    let requests = parser::parse_plugins_txt(&manifest_text).context("parsing plugins.txt")?;
+    let mut requests = parser::parse_plugins_txt(&manifest_text).context("parsing plugins.txt")?;
 
     println!("  {} plugin(s) in manifest", requests.len());
 
@@ -134,8 +146,98 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
     }
 
     println!("resolving dependencies...");
-    let resolved = resolver::resolve(&requests, &uc, &bundled);
+    let mut resolved = resolver::resolve(&requests, &uc, &bundled);
 
+    // ── Jenkins version compatibility check ───────────────────────────────────
+    let compat_issues = resolver::check_compat(&resolved, &uc, &args.jenkins_version);
+
+    if !compat_issues.is_empty() && !args.fix && !args.upgrade {
+        for issue in &compat_issues {
+            eprintln!(
+                "error: {}:{} requires Jenkins >= {} (target: {})",
+                issue.name, issue.version, issue.required_core, args.jenkins_version
+            );
+            match &issue.suggestion {
+                Some(v) => eprintln!("       → highest compatible version: {}:{}", issue.name, v),
+                None => eprintln!("       → no compatible version found in Update Center"),
+            }
+        }
+        eprintln!(
+            "       → run `jpm lock --fix` to auto-correct plugins.txt ({} issue(s))",
+            compat_issues.len()
+        );
+        anyhow::bail!(
+            "{} plugin(s) incompatible with Jenkins {}",
+            compat_issues.len(),
+            args.jenkins_version
+        );
+    }
+
+    // ── Build version update map (--fix and/or --upgrade) ────────────────────
+    if args.fix || args.upgrade {
+        let target = JenkinsVersion::new(&args.jenkins_version);
+        let mut updates: HashMap<String, String> = HashMap::new();
+
+        // --fix: fix only plugins that fail the compat check.
+        for issue in &compat_issues {
+            match &issue.suggestion {
+                Some(v) => {
+                    updates.insert(issue.name.clone(), v.clone());
+                }
+                None => {
+                    anyhow::bail!(
+                        "{}:{} requires Jenkins >= {} and no compatible version exists — \
+                         cannot auto-fix",
+                        issue.name,
+                        issue.version,
+                        issue.required_core
+                    );
+                }
+            }
+        }
+
+        // --upgrade: also update compatible plugins to the highest available version.
+        if args.upgrade {
+            for plugin in resolved.values() {
+                if updates.contains_key(&plugin.name) {
+                    continue;
+                }
+                if let Some(best) = uc.highest_compatible_version(&plugin.name, &target) {
+                    if JenkinsVersion::new(&best) > JenkinsVersion::new(&plugin.version) {
+                        updates.insert(plugin.name.clone(), best);
+                    }
+                }
+            }
+        }
+
+        if !updates.is_empty() {
+            let mut sorted: Vec<_> = updates.iter().collect();
+            sorted.sort_by_key(|(k, _)| k.as_str());
+            for (name, new_ver) in &sorted {
+                let old_ver = resolved
+                    .get(*name)
+                    .map(|p| p.version.as_str())
+                    .unwrap_or("?");
+                println!("  fixed: {name}:{old_ver} → {name}:{new_ver}");
+            }
+            println!(
+                "  {} plugin(s) updated — rewriting '{}'",
+                updates.len(),
+                args.plugin_file.display()
+            );
+
+            let new_manifest = parser::rewrite_versions(&manifest_text, &updates);
+            std::fs::write(&args.plugin_file, &new_manifest)
+                .with_context(|| format!("rewriting '{}'", args.plugin_file.display()))?;
+
+            // Re-resolve with the updated manifest.
+            requests =
+                parser::parse_plugins_txt(&new_manifest).context("re-parsing plugins.txt")?;
+            resolved = resolver::resolve(&requests, &uc, &bundled);
+        }
+    }
+
+    // ── Summary + lock file write ─────────────────────────────────────────────
     let direct = resolved.values().filter(|p| p.is_direct).count();
     let transitive = resolved.len() - direct;
     println!(
@@ -148,7 +250,9 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
     // Warn when the existing lock was generated from a different manifest.
     if let Ok(existing) = std::fs::read_to_string(&args.output) {
         if let Some(locked_hash) = lockfile::parse_manifest_hash(&existing) {
-            if locked_hash != lockfile::manifest_hash(&manifest_text) {
+            let current_manifest = std::fs::read_to_string(&args.plugin_file)
+                .unwrap_or_else(|_| manifest_text.clone());
+            if locked_hash != lockfile::manifest_hash(&current_manifest) {
                 eprintln!(
                     "  warning: '{}' is out of date — manifest changed since last lock",
                     args.output.display()
@@ -157,7 +261,9 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
         }
     }
 
-    let lock_content = lockfile::render(&resolved, &args.jenkins_version, &manifest_text);
+    let current_manifest =
+        std::fs::read_to_string(&args.plugin_file).unwrap_or_else(|_| manifest_text.clone());
+    let lock_content = lockfile::render(&resolved, &args.jenkins_version, &current_manifest);
     std::fs::write(&args.output, &lock_content)
         .with_context(|| format!("writing lock file '{}'", args.output.display()))?;
 

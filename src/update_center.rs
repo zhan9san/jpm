@@ -3,6 +3,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use crate::version::JenkinsVersion;
+
 const CACHE_TTL: Duration = Duration::from_secs(3600);
 
 const UC_STABLE_URL: &str = "https://updates.jenkins.io/update-center.actual.json?version=";
@@ -75,6 +77,110 @@ impl UpdateCenter {
     pub fn experimental_dependencies(&self, plugin: &str) -> Vec<(String, String, bool)> {
         let deps = &self.experimental["plugins"][plugin]["dependencies"];
         parse_deps(deps)
+    }
+
+    /// Return the `requiredCore` for a specific plugin version.
+    pub fn required_core_for(&self, name: &str, version: &str) -> Option<&str> {
+        self.plugin_versions["plugins"][name][version]["requiredCore"].as_str()
+    }
+
+    /// Return the highest version of `name` whose `requiredCore` ≤ `target`.
+    /// Returns `None` if the plugin has no entries in `plugin-versions.json`.
+    pub fn highest_compatible_version(
+        &self,
+        name: &str,
+        target: &JenkinsVersion,
+    ) -> Option<String> {
+        let versions = self.plugin_versions["plugins"][name].as_object()?;
+        versions
+            .keys()
+            .filter(|v| {
+                let rc = self.required_core_for(name, v).unwrap_or("1.0");
+                JenkinsVersion::new(rc) <= *target
+            })
+            .max_by(|a, b| JenkinsVersion::new(a.as_str()).cmp(&JenkinsVersion::new(b.as_str())))
+            .cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_uc(plugin_versions: Value) -> UpdateCenter {
+        UpdateCenter {
+            stable: json!({}),
+            experimental: json!({}),
+            plugin_versions,
+        }
+    }
+
+    #[test]
+    fn required_core_for_present() {
+        let uc = make_uc(json!({
+            "plugins": { "git": { "5.7.0": { "requiredCore": "2.479.1" } } }
+        }));
+        assert_eq!(uc.required_core_for("git", "5.7.0"), Some("2.479.1"));
+    }
+
+    #[test]
+    fn required_core_for_missing_version() {
+        let uc = make_uc(json!({ "plugins": { "git": {} } }));
+        assert_eq!(uc.required_core_for("git", "9.9.9"), None);
+    }
+
+    #[test]
+    fn highest_compatible_picks_max_within_target() {
+        let uc = make_uc(json!({
+            "plugins": {
+                "git": {
+                    "5.2.0": { "requiredCore": "2.387.3" },
+                    "5.5.0": { "requiredCore": "2.440.3" },
+                    "5.9.0": { "requiredCore": "2.504.3" }
+                }
+            }
+        }));
+        // Target Jenkins 2.452.4: 5.5.0 is compatible, 5.9.0 is not.
+        let best = uc.highest_compatible_version("git", &JenkinsVersion::new("2.452.4"));
+        assert_eq!(best.as_deref(), Some("5.5.0"));
+    }
+
+    #[test]
+    fn highest_compatible_all_too_new() {
+        let uc = make_uc(json!({
+            "plugins": {
+                "git": {
+                    "5.5.0": { "requiredCore": "2.440.3" },
+                    "5.9.0": { "requiredCore": "2.504.3" }
+                }
+            }
+        }));
+        // Target Jenkins 2.387.3: neither is compatible.
+        let best = uc.highest_compatible_version("git", &JenkinsVersion::new("2.387.3"));
+        assert_eq!(best, None);
+    }
+
+    #[test]
+    fn highest_compatible_exact_match_on_required_core() {
+        let uc = make_uc(json!({
+            "plugins": {
+                "git": {
+                    "5.2.0": { "requiredCore": "2.387.3" },
+                    "5.5.0": { "requiredCore": "2.440.3" }
+                }
+            }
+        }));
+        // Target exactly 2.440.3: 5.5.0 should be included (≤, not <).
+        let best = uc.highest_compatible_version("git", &JenkinsVersion::new("2.440.3"));
+        assert_eq!(best.as_deref(), Some("5.5.0"));
+    }
+
+    #[test]
+    fn highest_compatible_unknown_plugin() {
+        let uc = make_uc(json!({ "plugins": {} }));
+        let best = uc.highest_compatible_version("unknown", &JenkinsVersion::new("2.452.4"));
+        assert_eq!(best, None);
     }
 }
 
