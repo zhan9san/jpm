@@ -68,12 +68,7 @@ struct InstallArgs {
     lock: PathBuf,
 
     /// Directory to install plugins into.
-    #[arg(
-        short = 'd',
-        long,
-        value_name = "DIR",
-        default_value = "plugins"
-    )]
+    #[arg(short = 'd', long, value_name = "DIR", default_value = "plugins")]
     plugin_dir: PathBuf,
 
     /// Warn on individual download failures instead of aborting.
@@ -102,12 +97,14 @@ async fn main() -> Result<()> {
 }
 
 async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
-    println!("jpm lock: resolving plugins for Jenkins {}", args.jenkins_version);
+    println!(
+        "jpm lock: resolving plugins for Jenkins {}",
+        args.jenkins_version
+    );
 
     let manifest_text = std::fs::read_to_string(&args.plugin_file)
         .with_context(|| format!("reading manifest '{}'", args.plugin_file.display()))?;
-    let requests =
-        parser::parse_plugins_txt(&manifest_text).context("parsing plugins.txt")?;
+    let requests = parser::parse_plugins_txt(&manifest_text).context("parsing plugins.txt")?;
 
     println!("  {} plugin(s) in manifest", requests.len());
 

@@ -36,12 +36,8 @@ pub async fn install(client: &reqwest::Client, opts: &InstallOptions) -> Result<
     println!("jpm install: {} plugin(s) in lock file", entries.len());
 
     // 2. Ensure the plugin directory exists.
-    std::fs::create_dir_all(&opts.plugin_dir).with_context(|| {
-        format!(
-            "creating plugin directory '{}'",
-            opts.plugin_dir.display()
-        )
-    })?;
+    std::fs::create_dir_all(&opts.plugin_dir)
+        .with_context(|| format!("creating plugin directory '{}'", opts.plugin_dir.display()))?;
 
     // 3. Scan already-installed plugins (blocking, but fast).
     let installed = scan_installed(&opts.plugin_dir)
@@ -156,10 +152,7 @@ pub fn scan_installed(dir: &Path) -> Result<HashMap<String, String>> {
                 map.insert(name, version);
             }
             Err(e) => {
-                eprintln!(
-                    "  warning: skipping '{}': {e}",
-                    path.display()
-                );
+                eprintln!("  warning: skipping '{}': {e}", path.display());
             }
         }
     }
@@ -170,8 +163,8 @@ pub fn scan_installed(dir: &Path) -> Result<HashMap<String, String>> {
 /// Open an `.hpi`/`.jpi` ZIP archive and return `(short-name, plugin-version)`
 /// extracted from `META-INF/MANIFEST.MF`.
 fn read_plugin_manifest(path: &Path) -> Result<(String, String)> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("opening '{}'", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("opening '{}'", path.display()))?;
     let mut archive = zip::ZipArchive::new(file)
         .with_context(|| format!("'{}' is not a valid ZIP/HPI", path.display()))?;
 
@@ -188,11 +181,7 @@ fn read_plugin_manifest(path: &Path) -> Result<(String, String)> {
     let name = headers
         .get("Short-Name")
         .cloned()
-        .or_else(|| {
-            path.file_stem()
-                .and_then(|s| s.to_str())
-                .map(str::to_owned)
-        })
+        .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
         .with_context(|| format!("cannot determine name from '{}'", path.display()))?;
 
     let version = headers
@@ -213,9 +202,9 @@ fn parse_manifest_headers(content: &str) -> HashMap<String, String> {
     let mut current_val = String::new();
 
     for line in content.lines() {
-        if line.starts_with(' ') {
+        if let Some(rest) = line.strip_prefix(' ') {
             // Continuation: append (strip the leading space).
-            current_val.push_str(&line[1..]);
+            current_val.push_str(rest);
         } else {
             // Flush previous header.
             if let Some(key) = current_key.take() {
@@ -260,8 +249,7 @@ async fn download_with_retry(
     version: &str,
 ) -> Result<Vec<u8>> {
     // Honour the mirror override used by the Java plugin manager.
-    let base = std::env::var("JENKINS_UC_DOWNLOAD")
-        .unwrap_or_else(|_| PRIMARY_BASE.to_string());
+    let base = std::env::var("JENKINS_UC_DOWNLOAD").unwrap_or_else(|_| PRIMARY_BASE.to_string());
     let primary_url = format!("{base}/{name}/{version}/{name}.hpi");
 
     let mut last_err = None;
@@ -273,7 +261,10 @@ async fn download_with_retry(
                 last_err = Some(e);
                 if attempt < MAX_RETRIES {
                     let wait = Duration::from_millis(300 * (1 << (attempt - 1)));
-                    eprintln!("  retry {attempt}/{MAX_RETRIES} for {name} (waiting {}ms)", wait.as_millis());
+                    eprintln!(
+                        "  retry {attempt}/{MAX_RETRIES} for {name} (waiting {}ms)",
+                        wait.as_millis()
+                    );
                     tokio::time::sleep(wait).await;
                 }
             }
@@ -319,9 +310,7 @@ fn verify_sha256(bytes: &[u8], expected: Option<&str>, name: &str) -> Result<()>
     let computed = base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(bytes));
 
     if computed != expected {
-        bail!(
-            "{name}: integrity check failed\n  expected: {expected}\n  computed: {computed}"
-        );
+        bail!("{name}: integrity check failed\n  expected: {expected}\n  computed: {computed}");
     }
     Ok(())
 }
@@ -368,7 +357,10 @@ mod tests {
     fn parses_continuation_lines() {
         let manifest = "Long-Name: Git plugin with a very lon\r\n g name continued here\r\nPlugin-Version: 5.7.0\r\n";
         let headers = parse_manifest_headers(manifest);
-        assert_eq!(headers["Long-Name"], "Git plugin with a very long name continued here");
+        assert_eq!(
+            headers["Long-Name"],
+            "Git plugin with a very long name continued here"
+        );
         assert_eq!(headers["Plugin-Version"], "5.7.0");
     }
 

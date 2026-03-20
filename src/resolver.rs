@@ -87,9 +87,7 @@ pub fn resolve(
 
         // If the WAR bundles an equal-or-newer version, prefer the bundled one.
         let effective_version = match bundled.get(&entry.name) {
-            Some(bundled_ver) if JenkinsVersion::new(bundled_ver) >= new_ver => {
-                bundled_ver.clone()
-            }
+            Some(bundled_ver) if JenkinsVersion::new(bundled_ver) >= new_ver => bundled_ver.clone(),
             _ => entry.version.clone(),
         };
 

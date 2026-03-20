@@ -5,12 +5,10 @@ use std::time::{Duration, SystemTime};
 
 const CACHE_TTL: Duration = Duration::from_secs(3600);
 
-const UC_STABLE_URL: &str =
-    "https://updates.jenkins.io/update-center.actual.json?version=";
+const UC_STABLE_URL: &str = "https://updates.jenkins.io/update-center.actual.json?version=";
 const UC_EXPERIMENTAL_URL: &str =
     "https://updates.jenkins.io/experimental/update-center.actual.json";
-const UC_PLUGIN_VERSIONS_URL: &str =
-    "https://updates.jenkins.io/current/plugin-versions.json";
+const UC_PLUGIN_VERSIONS_URL: &str = "https://updates.jenkins.io/current/plugin-versions.json";
 
 /// Holds parsed data from the Jenkins Update Center.
 pub struct UpdateCenter {
