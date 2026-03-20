@@ -24,3 +24,7 @@ target
 # Added by cargo
 
 /target
+
+# Downloaded plugin binaries — do not commit
+sample/plugins/
+plugins/
