@@ -1,4 +1,5 @@
 mod bundled;
+mod installer;
 mod lockfile;
 mod parser;
 mod resolver;
@@ -6,18 +7,30 @@ mod update_center;
 mod version;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Jenkins Plugin Manager — generate reproducible plugin lock files.
-///
-/// Reads a `plugins.txt` manifest and a Jenkins version, resolves all
-/// transitive plugin dependencies against the Jenkins Update Center, and
-/// writes a `plugins-lock.txt` with every plugin pinned to an exact version.
+/// Jenkins Plugin Manager — reproducible plugin management for Jenkins.
 #[derive(Parser, Debug)]
 #[command(name = "jpm", version, about, long_about = None)]
 struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Resolve plugins.txt and generate a plugins-lock.txt.
+    Lock(LockArgs),
+    /// Install plugins from a lock file into a plugin directory.
+    Install(InstallArgs),
+}
+
+// ── jpm lock ──────────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+struct LockArgs {
     /// Jenkins version to target (e.g. `2.452.4`).
     #[arg(short = 'j', long, value_name = "VERSION")]
     jenkins_version: String,
@@ -41,35 +54,70 @@ struct Cli {
     skip_bundled: bool,
 }
 
+// ── jpm install ───────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+struct InstallArgs {
+    /// Path to the lock file to install from.
+    #[arg(
+        short = 'l',
+        long,
+        value_name = "FILE",
+        default_value = "plugins-lock.txt"
+    )]
+    lock: PathBuf,
+
+    /// Directory to install plugins into.
+    #[arg(
+        short = 'd',
+        long,
+        value_name = "DIR",
+        default_value = "plugins"
+    )]
+    plugin_dir: PathBuf,
+
+    /// Warn on individual download failures instead of aborting.
+    #[arg(long)]
+    skip_failed: bool,
+
+    /// Print what would be installed without downloading anything.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    println!(
-        "jpm: resolving plugins for Jenkins {}",
-        cli.jenkins_version
-    );
-
-    // Read and parse the plugin manifest.
-    let manifest_text = std::fs::read_to_string(&cli.plugin_file)
-        .with_context(|| format!("reading plugin manifest '{}'", cli.plugin_file.display()))?;
-    let requests = parser::parse_plugins_txt(&manifest_text).context("parsing plugins.txt")?;
-
-    println!("  {} plugin(s) in manifest", requests.len());
-
-    // Build HTTP client.
     let client = reqwest::Client::builder()
         .user_agent(concat!("jpm/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
-    // Fetch Update Center data and bundled plugins concurrently.
+    match cli.command {
+        Command::Lock(args) => run_lock(&client, args).await,
+        Command::Install(args) => run_install(&client, args).await,
+    }
+}
+
+async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
+    println!("jpm lock: resolving plugins for Jenkins {}", args.jenkins_version);
+
+    let manifest_text = std::fs::read_to_string(&args.plugin_file)
+        .with_context(|| format!("reading manifest '{}'", args.plugin_file.display()))?;
+    let requests =
+        parser::parse_plugins_txt(&manifest_text).context("parsing plugins.txt")?;
+
+    println!("  {} plugin(s) in manifest", requests.len());
+
     println!("fetching Update Center data and bundled plugin list...");
 
     let bundled_fut = async {
-        if cli.skip_bundled {
+        if args.skip_bundled {
             return Ok(HashMap::new());
         }
-        match bundled::fetch_bundled_plugins(&client, &cli.jenkins_version).await {
+        match bundled::fetch_bundled_plugins(client, &args.jenkins_version).await {
             Ok(map) => Ok(map),
             Err(e) => {
                 eprintln!("  warning: could not fetch bundled plugins: {e}");
@@ -79,7 +127,7 @@ async fn main() -> Result<()> {
     };
 
     let (uc, bundled) = tokio::try_join!(
-        update_center::UpdateCenter::fetch(&client, &cli.jenkins_version),
+        update_center::UpdateCenter::fetch(client, &args.jenkins_version),
         bundled_fut,
     )
     .context("fetching remote data")?;
@@ -88,7 +136,6 @@ async fn main() -> Result<()> {
         println!("  {} plugin(s) bundled in Jenkins WAR", bundled.len());
     }
 
-    // Resolve all transitive dependencies (synchronous BFS).
     println!("resolving dependencies...");
     let resolved = resolver::resolve(&requests, &uc, &bundled);
 
@@ -101,25 +148,35 @@ async fn main() -> Result<()> {
         transitive
     );
 
-    // Warn if an existing lock file was generated from a different manifest.
-    if let Ok(existing_lock) = std::fs::read_to_string(&cli.output) {
-        if let Some(locked_hash) = lockfile::parse_manifest_hash(&existing_lock) {
-            let current_hash = lockfile::manifest_hash(&manifest_text);
-            if locked_hash != current_hash {
+    // Warn when the existing lock was generated from a different manifest.
+    if let Ok(existing) = std::fs::read_to_string(&args.output) {
+        if let Some(locked_hash) = lockfile::parse_manifest_hash(&existing) {
+            if locked_hash != lockfile::manifest_hash(&manifest_text) {
                 eprintln!(
                     "  warning: '{}' is out of date — manifest changed since last lock",
-                    cli.output.display()
+                    args.output.display()
                 );
             }
         }
     }
 
-    // Write the lock file.
-    let lock_content = lockfile::render(&resolved, &cli.jenkins_version, &manifest_text);
-    std::fs::write(&cli.output, &lock_content)
-        .with_context(|| format!("writing lock file '{}'", cli.output.display()))?;
+    let lock_content = lockfile::render(&resolved, &args.jenkins_version, &manifest_text);
+    std::fs::write(&args.output, &lock_content)
+        .with_context(|| format!("writing lock file '{}'", args.output.display()))?;
 
-    println!("wrote '{}'", cli.output.display());
-
+    println!("wrote '{}'", args.output.display());
     Ok(())
+}
+
+async fn run_install(client: &reqwest::Client, args: InstallArgs) -> Result<()> {
+    installer::install(
+        client,
+        &installer::InstallOptions {
+            lock_file: args.lock,
+            plugin_dir: args.plugin_dir,
+            skip_failed: args.skip_failed,
+            dry_run: args.dry_run,
+        },
+    )
+    .await
 }
