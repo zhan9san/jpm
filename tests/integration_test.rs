@@ -48,6 +48,30 @@ async fn start_mock_uc() -> MockServer {
         .mount(&server)
         .await;
 
+    // split-plugin metadata path:
+    // /jenkins/jenkins-<VERSION>/core/src/main/resources/jenkins/split-plugins.txt
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/jenkins/jenkins-.*/core/src/main/resources/jenkins/split-plugins.txt$",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("# test split plugins\nsshd 2.281 3.236.ved5e1b_cb_50b_2\n"),
+        )
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/jenkins/jenkins-.*/core/src/main/resources/jenkins/split-plugin-cycles.txt$",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("# test split plugin cycle breaks\njavax-activation-api sshd\n"),
+        )
+        .mount(&server)
+        .await;
+
     server
 }
 
@@ -62,6 +86,7 @@ fn jpm(mock: &MockServer, cache: &TempDir) -> Command {
             "JPM_UC_PLUGIN_VERSIONS_URL",
             format!("{base}/plugin-versions"),
         )
+        .env("JPM_JENKINS_GH_BASE", format!("{base}/jenkins/jenkins-"))
         .env("JPM_POM_BASE_URL", format!("{base}/pom/jenkins-"))
         .env("JPM_CACHE_DIR", cache.path().to_str().unwrap());
     cmd

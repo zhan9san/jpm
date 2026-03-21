@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 
+use crate::detached::DetachedMetadata;
 use crate::parser::{PluginRequest, VersionSpec};
 use crate::update_center::UpdateCenter;
 use crate::version::JenkinsVersion;
@@ -186,6 +187,124 @@ pub fn check_compat(
     issues
 }
 
+/// Detect one dependency cycle in the effective plugin graph.
+///
+/// Returns a cycle path like `a -> b -> c -> a` when found, otherwise `None`.
+pub fn detect_cycle(
+    resolved: &HashMap<String, ResolvedPlugin>,
+    uc: &UpdateCenter,
+    bundled: &HashMap<String, String>,
+    detached: &DetachedMetadata,
+) -> Option<Vec<String>> {
+    let adjacency = build_cycle_adjacency(resolved, uc, bundled, detached);
+
+    fn dfs(
+        node: &str,
+        adjacency: &HashMap<String, Vec<String>>,
+        state: &mut HashMap<String, u8>,
+        stack: &mut Vec<String>,
+        stack_pos: &mut HashMap<String, usize>,
+    ) -> Option<Vec<String>> {
+        state.insert(node.to_string(), 1);
+        stack.push(node.to_string());
+        stack_pos.insert(node.to_string(), stack.len() - 1);
+
+        if let Some(neighbors) = adjacency.get(node) {
+            for neigh in neighbors {
+                let neigh_state = *state.get(neigh).unwrap_or(&0);
+                if neigh_state == 0 {
+                    if let Some(cycle) = dfs(neigh, adjacency, state, stack, stack_pos) {
+                        return Some(cycle);
+                    }
+                } else if neigh_state == 1 {
+                    let start = *stack_pos.get(neigh)?;
+                    let mut cycle = stack[start..].to_vec();
+                    cycle.push(neigh.clone());
+                    return Some(cycle);
+                }
+            }
+        }
+
+        stack.pop();
+        stack_pos.remove(node);
+        state.insert(node.to_string(), 2);
+        None
+    }
+
+    let mut state: HashMap<String, u8> = HashMap::new(); // 0=unvisited, 1=visiting, 2=done
+    let mut stack: Vec<String> = Vec::new();
+    let mut stack_pos: HashMap<String, usize> = HashMap::new();
+
+    let mut names: Vec<&String> = adjacency.keys().collect();
+    names.sort();
+    for name in names {
+        if *state.get(name).unwrap_or(&0) == 0 {
+            if let Some(cycle) = dfs(name, &adjacency, &mut state, &mut stack, &mut stack_pos) {
+                return Some(cycle);
+            }
+        }
+    }
+    None
+}
+
+fn build_cycle_adjacency(
+    resolved: &HashMap<String, ResolvedPlugin>,
+    uc: &UpdateCenter,
+    bundled: &HashMap<String, String>,
+    detached: &DetachedMetadata,
+) -> HashMap<String, Vec<String>> {
+    // Runtime-active plugins include resolved plugins plus bundled plugins.
+    let mut active: HashMap<String, String> = bundled.clone();
+    for plugin in resolved.values() {
+        active.insert(plugin.name.clone(), plugin.version.clone());
+    }
+
+    let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (name, version) in &active {
+        let deps = uc.dependencies_for(name, version);
+        let mut edges: Vec<String> = deps
+            .into_iter()
+            .filter_map(|(dep_name, _dep_version, _optional)| {
+                // Optional deps are active when the target plugin is present.
+                let dep_present = active.contains_key(&dep_name);
+                if !dep_present {
+                    None
+                } else {
+                    Some(dep_name)
+                }
+            })
+            .collect();
+
+        // Split/detached plugins can be implied by required Jenkins core.
+        // If a plugin targets an old core, Jenkins may add an implicit
+        // dependency on detached plugins present at runtime.
+        let plugin_required_core = uc.required_core_for(name, version).unwrap_or("0");
+        for (detached_name, split_core) in &detached.split_plugins {
+            if detached_name == name || !active.contains_key(detached_name) {
+                continue;
+            }
+            if JenkinsVersion::new(plugin_required_core) <= JenkinsVersion::new(split_core) {
+                edges.push(detached_name.clone());
+            }
+        }
+
+        edges.sort();
+        edges.dedup();
+
+        // Match Jenkins BREAK_CYCLES overrides for split plugins.
+        for (from, to) in &detached.break_cycles {
+            if from == name {
+                if let Some(i) = edges.iter().position(|e| e == to) {
+                    edges.remove(i);
+                }
+            }
+        }
+        adjacency.insert(name.clone(), edges);
+    }
+    adjacency
+}
+
 /// Resolve a `VersionSpec` into an actual version string and channel.
 fn resolve_version(req: &PluginRequest, uc: &UpdateCenter) -> Option<(String, Channel)> {
     match &req.version {
@@ -302,5 +421,111 @@ mod tests {
         assert_eq!(issues.len(), 2);
         assert_eq!(issues[0].name, "credentials");
         assert_eq!(issues[1].name, "mailer");
+    }
+
+    #[test]
+    fn detect_cycle_finds_back_edge_cycle() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "a": { "1.0.0": { "dependencies": [{ "name": "b", "version": "1.0.0", "optional": false }] } },
+                "b": { "1.0.0": { "dependencies": [{ "name": "c", "version": "1.0.0", "optional": false }] } },
+                "c": { "1.0.0": { "dependencies": [{ "name": "a", "version": "1.0.0", "optional": false }] } }
+            }
+        }));
+        let resolved = HashMap::from([
+            ("a".to_string(), resolved_plugin("a", "1.0.0")),
+            ("b".to_string(), resolved_plugin("b", "1.0.0")),
+            ("c".to_string(), resolved_plugin("c", "1.0.0")),
+        ]);
+        let detached = DetachedMetadata {
+            split_plugins: HashMap::new(),
+            break_cycles: vec![],
+        };
+
+        let bundled: HashMap<String, String> = HashMap::new();
+        let cycle = detect_cycle(&resolved, &uc, &bundled, &detached).expect("expected a cycle");
+        assert!(cycle.len() >= 2);
+        assert_eq!(cycle.first(), cycle.last());
+    }
+
+    #[test]
+    fn detect_cycle_ignores_optional_edge_when_target_absent() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "a": { "1.0.0": { "dependencies": [{ "name": "b", "version": "1.0.0", "optional": true }] } }
+            }
+        }));
+        let resolved = HashMap::from([("a".to_string(), resolved_plugin("a", "1.0.0"))]);
+        let detached = DetachedMetadata {
+            split_plugins: HashMap::new(),
+            break_cycles: vec![],
+        };
+        let bundled: HashMap<String, String> = HashMap::new();
+
+        assert!(detect_cycle(&resolved, &uc, &bundled, &detached).is_none());
+    }
+
+    #[test]
+    fn detect_cycle_activates_optional_edge_when_target_present() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "a": { "1.0.0": { "dependencies": [{ "name": "b", "version": "1.0.0", "optional": true }] } },
+                "b": { "1.0.0": { "dependencies": [{ "name": "a", "version": "1.0.0", "optional": false }] } }
+            }
+        }));
+        let resolved = HashMap::from([
+            ("a".to_string(), resolved_plugin("a", "1.0.0")),
+            ("b".to_string(), resolved_plugin("b", "1.0.0")),
+        ]);
+        let detached = DetachedMetadata {
+            split_plugins: HashMap::new(),
+            break_cycles: vec![],
+        };
+        let bundled: HashMap<String, String> = HashMap::new();
+
+        let cycle = detect_cycle(&resolved, &uc, &bundled, &detached).expect("expected a cycle");
+        assert_eq!(cycle.first(), cycle.last());
+    }
+
+    #[test]
+    fn detect_cycle_includes_bundled_plugins() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "a": { "1.0.0": { "dependencies": [{ "name": "b", "version": "1.0.0", "optional": true }] } },
+                "b": { "1.0.0": { "dependencies": [{ "name": "a", "version": "1.0.0", "optional": false }] } }
+            }
+        }));
+        let resolved = HashMap::from([("a".to_string(), resolved_plugin("a", "1.0.0"))]);
+        let bundled = HashMap::from([("b".to_string(), "1.0.0".to_string())]);
+        let detached = DetachedMetadata {
+            split_plugins: HashMap::new(),
+            break_cycles: vec![],
+        };
+
+        let cycle = detect_cycle(&resolved, &uc, &bundled, &detached).expect("expected a cycle");
+        assert_eq!(cycle.first(), cycle.last());
+    }
+
+    #[test]
+    fn detect_cycle_returns_none_for_dag() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "a": { "1.0.0": { "dependencies": [{ "name": "b", "version": "1.0.0", "optional": false }] } },
+                "b": { "1.0.0": { "dependencies": [{ "name": "c", "version": "1.0.0", "optional": false }] } },
+                "c": { "1.0.0": { "dependencies": [] } }
+            }
+        }));
+        let resolved = HashMap::from([
+            ("a".to_string(), resolved_plugin("a", "1.0.0")),
+            ("b".to_string(), resolved_plugin("b", "1.0.0")),
+            ("c".to_string(), resolved_plugin("c", "1.0.0")),
+        ]);
+
+        let bundled: HashMap<String, String> = HashMap::new();
+        let detached = DetachedMetadata {
+            split_plugins: HashMap::new(),
+            break_cycles: vec![],
+        };
+        assert!(detect_cycle(&resolved, &uc, &bundled, &detached).is_none());
     }
 }
