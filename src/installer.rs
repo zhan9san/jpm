@@ -315,14 +315,14 @@ fn verify_sha256(bytes: &[u8], expected: Option<&str>, name: &str) -> Result<()>
     Ok(())
 }
 
-/// Write `bytes` to `<plugin_dir>/<name>.hpi` via a temporary file to avoid
+/// Write `bytes` to `<plugin_dir>/<name>.jpi` via a temporary file to avoid
 /// Jenkins picking up an incomplete download.
 ///
 /// Uses `tokio::fs::rename` (atomic on the same filesystem). Falls back to
 /// copy + delete when source and destination are on different devices.
 async fn write_atomically(plugin_dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     let tmp_path = plugin_dir.join(format!(".jpm-{name}.tmp"));
-    let final_path = plugin_dir.join(format!("{name}.hpi"));
+    let final_path = plugin_dir.join(format!("{name}.jpi"));
 
     tokio::fs::write(&tmp_path, bytes)
         .await
@@ -332,7 +332,7 @@ async fn write_atomically(plugin_dir: &Path, name: &str, bytes: &[u8]) -> Result
         // Cross-device fallback: copy then delete the temp file.
         tokio::fs::copy(&tmp_path, &final_path)
             .await
-            .with_context(|| format!("moving {name}.hpi into plugin directory"))?;
+            .with_context(|| format!("moving {name}.jpi into plugin directory"))?;
         tokio::fs::remove_file(&tmp_path).await.ok();
     }
 
