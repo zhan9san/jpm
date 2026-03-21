@@ -67,10 +67,13 @@ fn parse_bundled_from_pom(xml: &str) -> Result<HashMap<String, String>> {
     reader.config_mut().trim_text(true);
 
     let mut plugins: HashMap<String, String> = HashMap::new();
+    let mut properties: HashMap<String, String> = HashMap::new();
 
     // State machine: track whether we are inside an <artifactItem> block
     // and collect artifactId / version / type fields.
+    // Also collect `<properties>` so `${...}` versions can be resolved.
     let mut in_item = false;
+    let mut in_properties = false;
     let mut artifact_id = String::new();
     let mut version = String::new();
     let mut item_type = String::new();
@@ -89,19 +92,29 @@ fn parse_bundled_from_pom(xml: &str) -> Result<HashMap<String, String>> {
                         version.clear();
                         item_type.clear();
                     }
+                    "properties" => {
+                        in_properties = true;
+                    }
                     _ if in_item => {
+                        current_tag = tag;
+                    }
+                    _ if in_properties => {
                         current_tag = tag;
                     }
                     _ => {}
                 }
             }
-            Ok(Event::Text(e)) if in_item => {
+            Ok(Event::Text(e)) if in_item || in_properties => {
                 let text = e.unescape().unwrap_or_default();
-                match current_tag.as_str() {
-                    "artifactId" => artifact_id = text.to_string(),
-                    "version" => version = text.to_string(),
-                    "type" => item_type = text.to_string(),
-                    _ => {}
+                if in_item {
+                    match current_tag.as_str() {
+                        "artifactId" => artifact_id = text.to_string(),
+                        "version" => version = text.to_string(),
+                        "type" => item_type = text.to_string(),
+                        _ => {}
+                    }
+                } else if in_properties && !current_tag.is_empty() {
+                    properties.insert(current_tag.clone(), text.to_string());
                 }
             }
             Ok(Event::End(e)) => {
@@ -109,9 +122,14 @@ fn parse_bundled_from_pom(xml: &str) -> Result<HashMap<String, String>> {
                 let tag = std::str::from_utf8(name_bytes.as_ref()).unwrap_or("");
                 if tag == "artifactItem" && in_item {
                     if item_type == "hpi" && !artifact_id.is_empty() && !version.is_empty() {
-                        plugins.insert(artifact_id.clone(), version.clone());
+                        let resolved_version = resolve_property_ref(&version, &properties)
+                            .unwrap_or_else(|| version.clone());
+                        plugins.insert(artifact_id.clone(), resolved_version);
                     }
                     in_item = false;
+                    current_tag.clear();
+                } else if tag == "properties" {
+                    in_properties = false;
                     current_tag.clear();
                 }
             }
@@ -122,6 +140,14 @@ fn parse_bundled_from_pom(xml: &str) -> Result<HashMap<String, String>> {
     }
 
     Ok(plugins)
+}
+
+fn resolve_property_ref(raw: &str, properties: &HashMap<String, String>) -> Option<String> {
+    if !(raw.starts_with("${") && raw.ends_with('}')) {
+        return Some(raw.to_string());
+    }
+    let key = &raw[2..raw.len() - 1];
+    properties.get(key).cloned()
 }
 
 #[cfg(test)]
@@ -169,5 +195,36 @@ mod tests {
             Some("1336.vf33a_a_9863911")
         );
         assert!(!bundled.contains_key("not-a-plugin"));
+    }
+
+    #[test]
+    fn resolves_version_property_references() {
+        let xml = r#"<?xml version="1.0"?>
+<project>
+  <properties>
+    <mina-sshd-api.version>2.14.0-138.v6341ee58e1df</mina-sshd-api.version>
+  </properties>
+  <build>
+    <plugins>
+      <plugin>
+        <configuration>
+          <artifactItems>
+            <artifactItem>
+              <artifactId>mina-sshd-api-core</artifactId>
+              <version>${mina-sshd-api.version}</version>
+              <type>hpi</type>
+            </artifactItem>
+          </artifactItems>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>"#;
+
+        let bundled = parse_bundled_from_pom(xml).unwrap();
+        assert_eq!(
+            bundled.get("mina-sshd-api-core").map(String::as_str),
+            Some("2.14.0-138.v6341ee58e1df")
+        );
     }
 }

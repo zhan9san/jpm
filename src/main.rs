@@ -1,4 +1,5 @@
 mod bundled;
+mod detached;
 mod installer;
 mod lockfile;
 mod parser;
@@ -135,9 +136,10 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
         }
     };
 
-    let (uc, bundled) = tokio::try_join!(
+    let (uc, bundled, detached) = tokio::try_join!(
         update_center::UpdateCenter::fetch(client, &args.jenkins_version),
         bundled_fut,
+        detached::fetch(client, &args.jenkins_version),
     )
     .context("fetching remote data")?;
 
@@ -235,6 +237,14 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
                 parser::parse_plugins_txt(&new_manifest).context("re-parsing plugins.txt")?;
             resolved = resolver::resolve(&requests, &uc, &bundled);
         }
+    }
+
+    // ── Dependency cycle check ────────────────────────────────────────────────
+    if let Some(cycle) = resolver::detect_cycle(&resolved, &uc, &bundled, &detached) {
+        anyhow::bail!(
+            "found cycle in plugin dependencies: {}\n       -> adjust pinned versions or run `jpm lock --fix` and re-resolve",
+            cycle.join(" -> ")
+        );
     }
 
     // ── Summary + lock file write ─────────────────────────────────────────────
