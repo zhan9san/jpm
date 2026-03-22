@@ -49,6 +49,7 @@ xattr -d com.apple.quarantine jpm
 ```bash
 jpm lock    -j <VERSION> [-f plugins.txt] [-o plugins-lock.txt] [--fix] [--upgrade]
 jpm install [-l plugins-lock.txt] [-d ./plugins/] [--dry-run] [--skip-failed]
+jpm doctor  [-l plugins-lock.txt] [-d ./plugins/] [--strict]
 ```
 
 | Situation | Command |
@@ -56,6 +57,14 @@ jpm install [-l plugins-lock.txt] [-d ./plugins/] [--dry-run] [--skip-failed]
 | Initial setup or routine update | `jpm lock -j <VERSION>` |
 | Jenkins upgrade breaks plugins | `jpm lock -j <VERSION> --fix` |
 | Annual Jenkins + plugin refresh | `jpm lock -j <VERSION> --fix --upgrade` |
+
+## Operating Modes
+
+- **Immutable image build:** run `jpm lock` then `jpm install`
+  into a clean plugin directory.
+- **Long-lived Jenkins server:** run `jpm doctor --strict`
+  before restart to catch drift (duplicate suffix files, version drift,
+  unmanaged plugins, disabled markers).
 
 Detailed `jpm lock` behavior and file formats are documented in
 [`docs/lock.md`](docs/lock.md).
@@ -68,5 +77,6 @@ reproducibility. jpm separates `lock` from `install` and persists the full
 resolved graph with checksums.
 
 See [`docs/lock.md`](docs/lock.md), [`docs/install.md`](docs/install.md),
+[`docs/doctor-design.md`](docs/doctor-design.md),
 [`docs/comparison.md`](docs/comparison.md), and
 [`docs/feature-status.md`](docs/feature-status.md).
