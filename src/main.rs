@@ -1,5 +1,6 @@
 mod bundled;
 mod detached;
+mod doctor;
 mod installer;
 mod lockfile;
 mod parser;
@@ -28,6 +29,8 @@ enum Command {
     Lock(LockArgs),
     /// Install plugins from a lock file into a plugin directory.
     Install(InstallArgs),
+    /// Validate plugin directory state against a lock file.
+    Doctor(DoctorArgs),
 }
 
 // ── jpm lock ──────────────────────────────────────────────────────────────────
@@ -93,6 +96,28 @@ struct InstallArgs {
     dry_run: bool,
 }
 
+// ── jpm doctor ────────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+struct DoctorArgs {
+    /// Path to the lock file to validate against.
+    #[arg(
+        short = 'l',
+        long,
+        value_name = "FILE",
+        default_value = "plugins-lock.txt"
+    )]
+    lock: PathBuf,
+
+    /// Directory containing installed plugin archives.
+    #[arg(short = 'd', long, value_name = "DIR", default_value = "plugins")]
+    plugin_dir: PathBuf,
+
+    /// Exit non-zero when any finding is detected.
+    #[arg(long)]
+    strict: bool,
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -106,6 +131,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Lock(args) => run_lock(&client, args).await,
         Command::Install(args) => run_install(&client, args).await,
+        Command::Doctor(args) => run_doctor(args),
     }
 }
 
@@ -292,4 +318,12 @@ async fn run_install(client: &reqwest::Client, args: InstallArgs) -> Result<()> 
         },
     )
     .await
+}
+
+fn run_doctor(args: DoctorArgs) -> Result<()> {
+    doctor::run(&doctor::DoctorOptions {
+        lock_file: args.lock,
+        plugin_dir: args.plugin_dir,
+        strict: args.strict,
+    })
 }
