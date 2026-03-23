@@ -4,7 +4,7 @@
 # Run: jpm lock -j 2.452.4 -f sample/plugins.txt -o sample/plugins-lock.txt
 # Run: jpm install -l sample/plugins-lock.txt -d sample/plugins/
 
-workflow-aggregator
-git
 credentials
+git
 mailer
+workflow-aggregator

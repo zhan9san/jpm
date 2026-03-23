@@ -100,7 +100,8 @@ jobs:
             -j 2.452.4 \
             -f sample/plugins.txt \
             -o /tmp/smoke-lock.txt \
-            --skip-bundled
+            --skip-bundled \
+            --fix
           echo "--- Lock file ---"
           cat /tmp/smoke-lock.txt
           plugin_count=$(grep -c '^[^#]' /tmp/smoke-lock.txt || true)
