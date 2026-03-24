@@ -52,6 +52,7 @@ jpm lock    -j <VERSION> [-f plugins.txt] [-o plugins-lock.txt] [--fix] [--upgra
 jpm install [-l plugins-lock.txt] [-d ./plugins/] [--dry-run] [--skip-failed]
 jpm doctor  [-l plugins-lock.txt] [-d ./plugins/] [--strict]
 jpm graph   -j <VERSION> (-f plugins.txt | -l plugins-lock.txt) [-o plugins-graph.dot] [--allow-cycle]
+jpm roots   -j <VERSION> [-f plugins.txt] [--write] [--keep <PLUGIN>]
 ```
 
 | Situation | Command |
@@ -81,5 +82,6 @@ resolved graph with checksums.
 See [`docs/lock.md`](docs/lock.md), [`docs/install.md`](docs/install.md),
 [`docs/doctor-design.md`](docs/doctor-design.md),
 [`docs/graph-design.md`](docs/graph-design.md),
+[`docs/roots-design.md`](docs/roots-design.md),
 [`docs/comparison.md`](docs/comparison.md), and
 [`docs/feature-status.md`](docs/feature-status.md).

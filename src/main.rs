@@ -6,6 +6,7 @@ mod installer;
 mod lockfile;
 mod parser;
 mod resolver;
+mod roots;
 mod update_center;
 mod version;
 
@@ -34,6 +35,8 @@ enum Command {
     Doctor(DoctorArgs),
     /// Generate dependency graph from plugins.txt or plugins-lock.txt.
     Graph(GraphArgs),
+    /// Minimize plugins.txt to root-only direct intents.
+    Roots(RootsArgs),
 }
 
 // ── jpm lock ──────────────────────────────────────────────────────────────────
@@ -155,6 +158,27 @@ struct GraphArgs {
     allow_cycle: bool,
 }
 
+// ── jpm roots ─────────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+struct RootsArgs {
+    /// Jenkins version to target (e.g. `2.452.4`).
+    #[arg(short = 'j', long, value_name = "VERSION")]
+    jenkins_version: String,
+
+    /// Path to input plugins.txt manifest.
+    #[arg(short = 'f', long, value_name = "FILE", default_value = "plugins.txt")]
+    plugin_file: PathBuf,
+
+    /// Rewrite plugins.txt in-place instead of writing plugins-roots.txt.
+    #[arg(long)]
+    write: bool,
+
+    /// Keep plugin in roots output even if transitively reachable.
+    #[arg(long, value_name = "PLUGIN")]
+    keep: Vec<String>,
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -170,6 +194,7 @@ async fn main() -> Result<()> {
         Command::Install(args) => run_install(&client, args).await,
         Command::Doctor(args) => run_doctor(args),
         Command::Graph(args) => run_graph(&client, args).await,
+        Command::Roots(args) => run_roots(&client, args).await,
     }
 }
 
@@ -376,6 +401,19 @@ async fn run_graph(client: &reqwest::Client, args: GraphArgs) -> Result<()> {
             output: args.output,
             skip_bundled: args.skip_bundled,
             allow_cycle: args.allow_cycle,
+        },
+    )
+    .await
+}
+
+async fn run_roots(client: &reqwest::Client, args: RootsArgs) -> Result<()> {
+    roots::run(
+        client,
+        roots::RootsOptions {
+            jenkins_version: args.jenkins_version,
+            plugin_file: args.plugin_file,
+            write: args.write,
+            keep: args.keep,
         },
     )
     .await

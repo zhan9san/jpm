@@ -383,6 +383,45 @@ async fn lock_warns_on_pin_override() {
     );
 }
 
+/// `jpm roots` writes a minimized roots file by default and removes selected
+/// plugins that are transitively required by other selected plugins.
+#[tokio::test]
+async fn roots_writes_default_file_and_drops_transitive_selected_plugins() {
+    let mock = start_mock_uc().await;
+    let tmp = TempDir::new().unwrap();
+    let plugins_txt = tmp.path().join("plugins.txt");
+    fs::write(
+        &plugins_txt,
+        "# roots sample\ngit:5.7.0\ncredentials:1453.v9b_a_29777a_b_fd\n",
+    )
+    .unwrap();
+
+    jpm(&mock, &tmp)
+        .args([
+            "roots",
+            "-j",
+            JENKINS_VERSION,
+            "-f",
+            plugins_txt.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let roots = fs::read_to_string(tmp.path().join("plugins-roots.txt")).unwrap();
+    assert!(
+        roots.contains("git:5.7.0"),
+        "roots output should keep git:\n{roots}"
+    );
+    assert!(
+        !roots.contains("credentials:1453.v9b_a_29777a_b_fd"),
+        "roots output should drop selected transitive dependency:\n{roots}"
+    );
+    assert!(
+        roots.contains("# roots sample"),
+        "roots output should preserve comment lines:\n{roots}"
+    );
+}
+
 /// `jpm install --dry-run` reads a lock file and reports what would be
 /// installed without making network calls.
 #[tokio::test]
