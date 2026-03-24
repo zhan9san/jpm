@@ -23,7 +23,8 @@ jpm install -l plugins-lock.txt -d ./plugins/
 
 - **Lock file** — pins every transitive dep to an exact version + SHA-256
 - **Staleness detection** — warns when `plugins.txt` changed since last lock
-- **Bundled plugin awareness** — fetches `war/pom.xml` (30 KB) not the 80 MB WAR
+- **Bundled metadata awareness** — fetches `war/pom.xml` (30 KB) for
+  runtime-aware graph checks (no bundled version uplift during resolve)
 - **Concurrent downloads** — parallel `tokio` tasks with retry + mirror fallback
 - **Atomic writes** — no half-written plugin files on failure
 - **Dry-run & skip-failed** flags
@@ -50,6 +51,7 @@ xattr -d com.apple.quarantine jpm
 jpm lock    -j <VERSION> [-f plugins.txt] [-o plugins-lock.txt] [--fix] [--upgrade]
 jpm install [-l plugins-lock.txt] [-d ./plugins/] [--dry-run] [--skip-failed]
 jpm doctor  [-l plugins-lock.txt] [-d ./plugins/] [--strict]
+jpm graph   -j <VERSION> (-f plugins.txt | -l plugins-lock.txt) [-o plugins-graph.dot] [--allow-cycle]
 ```
 
 | Situation | Command |
@@ -78,5 +80,6 @@ resolved graph with checksums.
 
 See [`docs/lock.md`](docs/lock.md), [`docs/install.md`](docs/install.md),
 [`docs/doctor-design.md`](docs/doctor-design.md),
+[`docs/graph-design.md`](docs/graph-design.md),
 [`docs/comparison.md`](docs/comparison.md), and
 [`docs/feature-status.md`](docs/feature-status.md).

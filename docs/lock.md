@@ -81,8 +81,13 @@ After rewrite, JPM resolves again and writes the new lock.
 
 ## Bundled plugin handling
 
-By default, JPM fetches bundled plugin versions for your Jenkins core and avoids
-pinning older versions than what Jenkins already bundles.
+By default, JPM fetches bundled plugin metadata for your Jenkins core, but lock
+resolution preserves versions from the manifest-driven dependency chain (no
+bundled-version uplift during resolve).
+
+Bundled metadata is still used for effective graph construction in cycle checks
+(together with split/detached metadata), so cycle detection remains
+bundled-aware.
 
 Use `--skip-bundled` for faster runs if you do not need bundled-awareness.
 

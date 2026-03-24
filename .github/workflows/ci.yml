@@ -98,7 +98,7 @@ jobs:
         run: |
           ./target/debug/jpm lock \
             -j 2.452.4 \
-            -f sample/plugins.txt \
+            -f plugins.txt \
             -o /tmp/smoke-lock.txt \
             --skip-bundled \
             --fix
