@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The version specifier for a requested plugin.
 #[derive(Debug, Clone, PartialEq)]
@@ -130,6 +130,37 @@ pub fn rewrite_versions(content: &str, updates: &HashMap<String, String>) -> Str
     }
 }
 
+/// Keep only plugin entries whose names are in `keep_names`.
+///
+/// - Blank lines and comment-only lines are preserved verbatim.
+/// - Plugin lines not in `keep_names` are removed.
+/// - A trailing newline is preserved if the original had one.
+pub fn filter_plugins(content: &str, keep_names: &HashSet<String>) -> String {
+    let mut out: Vec<String> = Vec::new();
+
+    for raw in content.lines() {
+        let (code, _) = split_code_comment(raw);
+        let trimmed = code.trim();
+        if trimmed.is_empty() {
+            out.push(raw.to_string());
+            continue;
+        }
+
+        let parts: Vec<&str> = trimmed.splitn(3, ':').collect();
+        let name = parts[0].trim();
+        if keep_names.contains(name) {
+            out.push(raw.to_string());
+        }
+    }
+
+    let joined = out.join("\n");
+    if content.ends_with('\n') {
+        joined + "\n"
+    } else {
+        joined
+    }
+}
+
 fn split_code_comment(s: &str) -> (&str, &str) {
     match s.find('#') {
         Some(i) => (&s[..i], &s[i..]),
@@ -240,5 +271,13 @@ docker # inline comment
 
         assert_eq!(plugins[6].name, "docker");
         assert_eq!(plugins[6].version, VersionSpec::Latest);
+    }
+
+    #[test]
+    fn filter_plugins_preserves_comments_and_keeps_selected() {
+        let content = "# header\na:1\nb:2  # note\n\nc\n";
+        let keep = HashSet::from(["a".to_string(), "c".to_string()]);
+        let out = filter_plugins(content, &keep);
+        assert_eq!(out, "# header\na:1\n\nc\n");
     }
 }
