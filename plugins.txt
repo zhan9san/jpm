@@ -1,0 +1,8 @@
+# Sample Jenkins plugin manifest
+# A minimal CI stack: pipeline + git + credentials
+#
+# Run: jpm lock -j 2.452.4 -f plugins.txt -o plugins-lock.txt
+# Run: jpm install -l plugins-lock.txt -d sampplugins/
+
+configuration-as-code:1.51
+credentials:2.6.1.1

@@ -136,11 +136,10 @@ async fn lock_resolves_transitive_deps() {
     );
 }
 
-/// When a plugin is pinned to a version older than the WAR-bundled version,
-/// `jpm lock` promotes it to the bundled version (prevents downgrading Jenkins
-/// built-ins).
+/// When a plugin is pinned, `jpm lock` preserves that version in lock output
+/// instead of uplifting to the WAR-bundled version.
 #[tokio::test]
-async fn lock_uses_bundled_version_when_pin_is_older() {
+async fn lock_preserves_pinned_version_without_bundled_uplift() {
     let mock = start_mock_uc().await;
     let tmp = TempDir::new().unwrap();
 
@@ -162,12 +161,12 @@ async fn lock_uses_bundled_version_when_pin_is_older() {
 
     let lock = fs::read_to_string(tmp.path().join("plugins-lock.txt")).unwrap();
     assert!(
-        lock.contains("mailer:472.vf7c289a_4b_c36"),
-        "bundled version should win over the older pin:\n{lock}"
+        lock.contains("mailer:300.0"),
+        "pinned version should be kept:\n{lock}"
     );
     assert!(
-        !lock.contains("mailer:300.0"),
-        "older pin should be overridden by bundled version:\n{lock}"
+        !lock.contains("mailer:472.vf7c289a_4b_c36"),
+        "bundled version should not override pinned version:\n{lock}"
     );
 }
 

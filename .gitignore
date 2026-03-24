@@ -26,5 +26,5 @@ target
 /target
 
 # Downloaded plugin binaries — do not commit
-sample/plugins/
-plugins/
+plugins
+plugins-graph.dot

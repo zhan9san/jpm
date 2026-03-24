@@ -1,6 +1,7 @@
 mod bundled;
 mod detached;
 mod doctor;
+mod graph;
 mod installer;
 mod lockfile;
 mod parser;
@@ -31,6 +32,8 @@ enum Command {
     Install(InstallArgs),
     /// Validate plugin directory state against a lock file.
     Doctor(DoctorArgs),
+    /// Generate dependency graph from plugins.txt or plugins-lock.txt.
+    Graph(GraphArgs),
 }
 
 // ── jpm lock ──────────────────────────────────────────────────────────────────
@@ -118,6 +121,40 @@ struct DoctorArgs {
     strict: bool,
 }
 
+// ── jpm graph ─────────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+struct GraphArgs {
+    /// Jenkins version to target (e.g. `2.452.4`).
+    #[arg(short = 'j', long, value_name = "VERSION")]
+    jenkins_version: String,
+
+    /// Path to input plugins.txt manifest.
+    #[arg(short = 'f', long, value_name = "FILE")]
+    plugin_file: Option<PathBuf>,
+
+    /// Path to input plugins-lock.txt.
+    #[arg(short = 'l', long, value_name = "FILE")]
+    lock_file: Option<PathBuf>,
+
+    /// DOT output file path.
+    #[arg(
+        short = 'o',
+        long,
+        value_name = "FILE",
+        default_value = "plugins-graph.dot"
+    )]
+    output: PathBuf,
+
+    /// Skip fetching bundled plugin versions from the Jenkins WAR pom.xml.
+    #[arg(long)]
+    skip_bundled: bool,
+
+    /// Return zero exit code even when a cycle exists.
+    #[arg(long)]
+    allow_cycle: bool,
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -132,6 +169,7 @@ async fn main() -> Result<()> {
         Command::Lock(args) => run_lock(&client, args).await,
         Command::Install(args) => run_install(&client, args).await,
         Command::Doctor(args) => run_doctor(args),
+        Command::Graph(args) => run_graph(&client, args).await,
     }
 }
 
@@ -174,7 +212,7 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
     }
 
     println!("resolving dependencies...");
-    let mut resolved = resolver::resolve(&requests, &uc, &bundled);
+    let mut resolved = resolver::resolve(&requests, &uc);
 
     // ── Jenkins version compatibility check ───────────────────────────────────
     let compat_issues = resolver::check_compat(&resolved, &uc, &args.jenkins_version);
@@ -261,7 +299,7 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
             // Re-resolve with the updated manifest.
             requests =
                 parser::parse_plugins_txt(&new_manifest).context("re-parsing plugins.txt")?;
-            resolved = resolver::resolve(&requests, &uc, &bundled);
+            resolved = resolver::resolve(&requests, &uc);
         }
     }
 
@@ -326,4 +364,19 @@ fn run_doctor(args: DoctorArgs) -> Result<()> {
         plugin_dir: args.plugin_dir,
         strict: args.strict,
     })
+}
+
+async fn run_graph(client: &reqwest::Client, args: GraphArgs) -> Result<()> {
+    graph::run(
+        client,
+        graph::GraphArgs {
+            jenkins_version: args.jenkins_version,
+            plugin_file: args.plugin_file,
+            lock_file: args.lock_file,
+            output: args.output,
+            skip_bundled: args.skip_bundled,
+            allow_cycle: args.allow_cycle,
+        },
+    )
+    .await
 }

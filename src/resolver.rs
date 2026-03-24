@@ -54,11 +54,7 @@ struct QueueEntry {
 /// 3. For each dependency, if not yet seen add it; if seen, keep higher version
 ///    and re-enqueue if upgraded (so its own deps are re-visited).
 /// 4. Return the final map of `name → ResolvedPlugin`.
-pub fn resolve(
-    requests: &[PluginRequest],
-    uc: &UpdateCenter,
-    bundled: &HashMap<String, String>,
-) -> HashMap<String, ResolvedPlugin> {
+pub fn resolve(requests: &[PluginRequest], uc: &UpdateCenter) -> HashMap<String, ResolvedPlugin> {
     let mut resolved: HashMap<String, ResolvedPlugin> = HashMap::new();
     let mut queue: VecDeque<QueueEntry> = VecDeque::new();
 
@@ -115,11 +111,7 @@ pub fn resolve(
             );
         }
 
-        // If the WAR bundles an equal-or-newer version, prefer the bundled one.
-        let effective_version = match bundled.get(&entry.name) {
-            Some(bundled_ver) if JenkinsVersion::new(bundled_ver) >= new_ver => bundled_ver.clone(),
-            _ => entry.version.clone(),
-        };
+        let effective_version = entry.version.clone();
 
         let sha256 = uc
             .sha256_for(&entry.name, &effective_version)
@@ -196,7 +188,7 @@ pub fn detect_cycle(
     bundled: &HashMap<String, String>,
     detached: &DetachedMetadata,
 ) -> Option<Vec<String>> {
-    let adjacency = build_cycle_adjacency(resolved, uc, bundled, detached);
+    let adjacency = cycle_adjacency(resolved, uc, bundled, detached);
 
     fn dfs(
         node: &str,
@@ -247,7 +239,7 @@ pub fn detect_cycle(
     None
 }
 
-fn build_cycle_adjacency(
+pub fn cycle_adjacency(
     resolved: &HashMap<String, ResolvedPlugin>,
     uc: &UpdateCenter,
     bundled: &HashMap<String, String>,
@@ -527,5 +519,23 @@ mod tests {
             break_cycles: vec![],
         };
         assert!(detect_cycle(&resolved, &uc, &bundled, &detached).is_none());
+    }
+
+    #[test]
+    fn resolve_preserves_pinned_version_even_if_bundled_is_newer() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "a": {
+                    "1.0.0": { "dependencies": [] }
+                }
+            }
+        }));
+        let requests = vec![PluginRequest {
+            name: "a".to_string(),
+            version: VersionSpec::Pinned("1.0.0".to_string()),
+            url: None,
+        }];
+        let resolved = resolve(&requests, &uc);
+        assert_eq!(resolved["a"].version, "1.0.0");
     }
 }

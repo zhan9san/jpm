@@ -107,6 +107,14 @@ pub fn parse_manifest_hash(content: &str) -> Option<String> {
     })
 }
 
+/// Extract the `Jenkins` header value from a lock file, if present.
+pub fn parse_jenkins_version(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        line.strip_prefix("# Jenkins: ")
+            .map(|v| v.trim().to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +186,13 @@ mod tests {
         let rendered = render(&plugins, "2.452.4", manifest);
         let extracted = parse_manifest_hash(&rendered).unwrap();
         assert_eq!(extracted, manifest_hash(manifest));
+    }
+
+    #[test]
+    fn parse_jenkins_version_roundtrip() {
+        let plugins: HashMap<String, ResolvedPlugin> = HashMap::new();
+        let rendered = render(&plugins, "2.452.4", "git\n");
+        let extracted = parse_jenkins_version(&rendered).unwrap();
+        assert_eq!(extracted, "2.452.4");
     }
 }
