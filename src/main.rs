@@ -321,9 +321,41 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
             std::fs::write(&args.plugin_file, &new_manifest)
                 .with_context(|| format!("rewriting '{}'", args.plugin_file.display()))?;
 
-            // Re-resolve with the updated manifest.
             requests =
                 parser::parse_plugins_txt(&new_manifest).context("re-parsing plugins.txt")?;
+        }
+
+        if args.upgrade {
+            // Keep upgrade floors for transitive plugins too; otherwise
+            // transitive upgrades can be lost after manifest rewrite.
+            let mut upgrade_floors = updates.clone();
+            loop {
+                let candidate =
+                    resolver::resolve_with_min_versions(&requests, &uc, &upgrade_floors);
+                let mut changed = false;
+                for plugin in candidate.values() {
+                    if let Some(best) = uc.highest_compatible_version(&plugin.name, &target) {
+                        if JenkinsVersion::new(&best) > JenkinsVersion::new(&plugin.version) {
+                            let should_update = match upgrade_floors.get(&plugin.name) {
+                                Some(existing) => {
+                                    JenkinsVersion::new(&best) > JenkinsVersion::new(existing)
+                                }
+                                None => true,
+                            };
+                            if should_update {
+                                upgrade_floors.insert(plugin.name.clone(), best);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                resolved = candidate;
+                if !changed {
+                    break;
+                }
+            }
+        } else if !updates.is_empty() {
+            // --fix only: re-resolve with rewritten direct pins.
             resolved = resolver::resolve(&requests, &uc);
         }
     }

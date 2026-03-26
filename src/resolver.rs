@@ -55,8 +55,21 @@ struct QueueEntry {
 ///    and re-enqueue if upgraded (so its own deps are re-visited).
 /// 4. Return the final map of `name → ResolvedPlugin`.
 pub fn resolve(requests: &[PluginRequest], uc: &UpdateCenter) -> HashMap<String, ResolvedPlugin> {
+    resolve_with_min_versions(requests, uc, &HashMap::new())
+}
+
+/// Resolve with optional minimum versions ("floors") applied to plugins.
+///
+/// When a floor exists for a plugin, the resolver will use at least that
+/// version for both direct and transitive occurrences.
+pub fn resolve_with_min_versions(
+    requests: &[PluginRequest],
+    uc: &UpdateCenter,
+    min_versions: &HashMap<String, String>,
+) -> HashMap<String, ResolvedPlugin> {
     let mut resolved: HashMap<String, ResolvedPlugin> = HashMap::new();
     let mut queue: VecDeque<QueueEntry> = VecDeque::new();
+    let mut optional_min_versions: HashMap<String, String> = HashMap::new();
 
     // Track which plugins were explicitly pinned in plugins.txt so we can warn
     // when a transitive dependency forces an upgrade past the pin.
@@ -80,6 +93,12 @@ pub fn resolve(requests: &[PluginRequest], uc: &UpdateCenter) -> HashMap<String,
                 continue;
             }
         };
+        let version = match min_versions.get(&req.name) {
+            Some(floor) if JenkinsVersion::new(floor) > JenkinsVersion::new(&version) => {
+                floor.clone()
+            }
+            _ => version,
+        };
         queue.push_back(QueueEntry {
             name: req.name.clone(),
             version,
@@ -88,7 +107,20 @@ pub fn resolve(requests: &[PluginRequest], uc: &UpdateCenter) -> HashMap<String,
         });
     }
 
-    while let Some(entry) = queue.pop_front() {
+    while let Some(mut entry) = queue.pop_front() {
+        // Optional dependencies can still impose a minimum version when the
+        // target plugin is present in the effective graph.
+        if let Some(min_version) = optional_min_versions.get(&entry.name) {
+            if JenkinsVersion::new(min_version) > JenkinsVersion::new(&entry.version) {
+                entry.version = min_version.clone();
+            }
+        }
+        if let Some(min_version) = min_versions.get(&entry.name) {
+            if JenkinsVersion::new(min_version) > JenkinsVersion::new(&entry.version) {
+                entry.version = min_version.clone();
+            }
+        }
+
         let new_ver = JenkinsVersion::new(&entry.version);
 
         if let Some(existing) = resolved.get(&entry.name) {
@@ -136,11 +168,46 @@ pub fn resolve(requests: &[PluginRequest], uc: &UpdateCenter) -> HashMap<String,
 
         for (dep_name, dep_version, optional) in deps {
             if optional {
+                let floor_changed = match optional_min_versions.get(&dep_name) {
+                    Some(existing_floor) => {
+                        JenkinsVersion::new(&dep_version) > JenkinsVersion::new(existing_floor)
+                    }
+                    None => true,
+                };
+                if floor_changed {
+                    optional_min_versions.insert(dep_name.clone(), dep_version.clone());
+                }
+
+                if let Some(existing) = resolved.get(&dep_name) {
+                    if JenkinsVersion::new(&dep_version) > JenkinsVersion::new(&existing.version) {
+                        queue.push_back(QueueEntry {
+                            name: dep_name,
+                            version: dep_version,
+                            channel: Channel::Pinned,
+                            is_direct: false,
+                        });
+                    }
+                }
                 continue;
             }
+
+            let dep_effective_version = match optional_min_versions.get(&dep_name) {
+                Some(floor) if JenkinsVersion::new(floor) > JenkinsVersion::new(&dep_version) => {
+                    floor.clone()
+                }
+                _ => dep_version,
+            };
+            let dep_effective_version = match min_versions.get(&dep_name) {
+                Some(floor)
+                    if JenkinsVersion::new(floor) > JenkinsVersion::new(&dep_effective_version) =>
+                {
+                    floor.clone()
+                }
+                _ => dep_effective_version,
+            };
             queue.push_back(QueueEntry {
                 name: dep_name,
-                version: dep_version,
+                version: dep_effective_version,
                 channel: Channel::Pinned,
                 is_direct: false,
             });
@@ -537,5 +604,47 @@ mod tests {
         }];
         let resolved = resolve(&requests, &uc);
         assert_eq!(resolved["a"].version, "1.0.0");
+    }
+
+    #[test]
+    fn resolve_upgrades_present_plugin_to_optional_dependency_floor() {
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "a": {
+                    "1.0.0": {
+                        "dependencies": [
+                            { "name": "b", "version": "1.0.0", "optional": false }
+                        ]
+                    }
+                },
+                "b": {
+                    "1.0.0": { "dependencies": [] },
+                    "2.0.0": { "dependencies": [] }
+                },
+                "c": {
+                    "1.0.0": {
+                        "dependencies": [
+                            { "name": "b", "version": "2.0.0", "optional": true }
+                        ]
+                    }
+                }
+            }
+        }));
+
+        let requests = vec![
+            PluginRequest {
+                name: "a".to_string(),
+                version: VersionSpec::Pinned("1.0.0".to_string()),
+                url: None,
+            },
+            PluginRequest {
+                name: "c".to_string(),
+                version: VersionSpec::Pinned("1.0.0".to_string()),
+                url: None,
+            },
+        ];
+
+        let resolved = resolve(&requests, &uc);
+        assert_eq!(resolved["b"].version, "2.0.0");
     }
 }
