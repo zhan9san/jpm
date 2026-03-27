@@ -1,8 +1,46 @@
-# Sample Jenkins plugin manifest
-# A minimal CI stack: pipeline + git + credentials
-#
-# Run: jpm lock -j 2.452.4 -f plugins.txt -o plugins-lock.txt
-# Run: jpm install -l plugins-lock.txt -d sampplugins/
-
-configuration-as-code:1.51
-credentials:2.6.1.1
+artifactory:4.0.8
+authorize-project:1.8.1
+aws-credentials:243.v41c19a_fb_5dcf
+basic-branch-build-strategies:81.v05e333931c7d
+bitbucket:254.v9d8ec33a_7a_42
+blueocean:1.27.16
+buildtriggerbadge:273.vb_d217761b_6d9
+cloudbees-bitbucket-branch-source:895.v15dc41668f03
+command-launcher:116.vd85919c54a_d6
+configuration-as-code:1873.vea_5814ca_9c93
+credentials:1380.va_435002fa_924
+credentials-binding:681.vf91669a_32e45
+dashboard-view:2.523.v673d549dfee5
+docker-plugin:1.7.0
+extended-choice-parameter:382.v5697b_32134e8
+file-operations:266.v9d4e1eb_235b_a_
+file-parameters:339.v4b_cc83e11455
+generic-webhook-trigger:2.2.5
+git:5.5.2
+groovy-events-listener-plugin:2.240.ve36a_f312f329
+http_request:1.19
+jacoco:3.3.7
+javax-mail-api:1.6.2-10
+jdk-tool:80.v8a_dee33ed6f0
+jira-steps:2.0.180.vccfe35b_5910d
+job-dsl:1.87
+kubernetes:4306.vc91e951ea_eb_d
+kubernetes-cli:1.12.1
+ldap:725.v3cb_b_711b_1a_ef
+matrix-auth:3.2.3
+next-build-number:66.v4b_4762172d53
+Office-365-Connector:5.0.0
+pipeline-stage-view:2.34
+pipeline-utility-steps:2.18.0
+Parameterized-Remote-Trigger:3.2.1
+rebuild:332.va_1ee476d8f6d
+rich-text-publisher-plugin:1.5
+sectioned-view:1.28
+snakeyaml-api:2.3-123.v13484c65210a_
+sonar:2.17.2
+sshd:3.330.vc866a_8389b_58
+throttle-concurrents:2.14
+timestamper:1.27
+workflow-aggregator:600.vb_57cdd26fdd7
+ws-cleanup:0.47
+xml-job-to-job-dsl:0.1.13
