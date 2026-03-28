@@ -1,0 +1,40 @@
+name: Smoke test (live UC)
+
+on:
+  schedule:
+    # Weekly smoke test against the live Jenkins Update Center (Monday 06:00 UTC).
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  smoke:
+    name: Smoke test (live UC)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Run jpm lock against live Update Center
+        run: |
+          ./target/debug/jpm lock \
+            -j 2.452.4 \
+            -f plugins.txt \
+            -o /tmp/smoke-lock.txt \
+            --skip-bundled \
+            --fix
+          echo "--- Lock file ---"
+          cat /tmp/smoke-lock.txt
+          plugin_count=$(grep -c '^[^#]' /tmp/smoke-lock.txt || true)
+          echo "Resolved ${plugin_count} plugin(s)"
+          [ "$plugin_count" -gt 0 ]
