@@ -49,6 +49,7 @@ pub fn render(
     plugins: &HashMap<String, ResolvedPlugin>,
     jenkins_version: &str,
     manifest_content: &str,
+    include_sha256: bool,
 ) -> String {
     let mut out = String::with_capacity(plugins.len() * 64);
 
@@ -64,11 +65,15 @@ pub fn render(
     sorted.sort_by_key(|p| &p.name);
 
     for plugin in sorted {
-        let checksum = plugin
-            .sha256
-            .as_deref()
-            .map(|h| format!(" sha256:{h}"))
-            .unwrap_or_default();
+        let checksum = if include_sha256 {
+            plugin
+                .sha256
+                .as_deref()
+                .map(|h| format!(" sha256:{h}"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         out.push_str(&format!("{}:{}{checksum}\n", plugin.name, plugin.version));
     }
 
@@ -140,7 +145,7 @@ mod tests {
             make_plugin("credentials", "1415.v831096eb_5534", None),
         );
 
-        let rendered = render(&plugins, "2.452.4", "git\ncredentials\n");
+        let rendered = render(&plugins, "2.452.4", "git\ncredentials\n", true);
         assert!(rendered.contains("git:5.7.0 sha256:aabbccdd"));
         assert!(rendered.contains("credentials:1415.v831096eb_5534\n"));
 
@@ -157,7 +162,7 @@ mod tests {
         for name in &["zebra", "alpha", "mango"] {
             plugins.insert(name.to_string(), make_plugin(name, "1.0", None));
         }
-        let rendered = render(&plugins, "2.452.4", "");
+        let rendered = render(&plugins, "2.452.4", "", true);
         let names: Vec<&str> = rendered
             .lines()
             .filter(|l| !l.starts_with('#') && !l.is_empty())
@@ -183,7 +188,7 @@ mod tests {
     fn parse_manifest_hash_roundtrip() {
         let plugins: HashMap<String, ResolvedPlugin> = HashMap::new();
         let manifest = "git\ncredentials\n";
-        let rendered = render(&plugins, "2.452.4", manifest);
+        let rendered = render(&plugins, "2.452.4", manifest, true);
         let extracted = parse_manifest_hash(&rendered).unwrap();
         assert_eq!(extracted, manifest_hash(manifest));
     }
@@ -191,8 +196,20 @@ mod tests {
     #[test]
     fn parse_jenkins_version_roundtrip() {
         let plugins: HashMap<String, ResolvedPlugin> = HashMap::new();
-        let rendered = render(&plugins, "2.452.4", "git\n");
+        let rendered = render(&plugins, "2.452.4", "git\n", true);
         let extracted = parse_jenkins_version(&rendered).unwrap();
         assert_eq!(extracted, "2.452.4");
+    }
+
+    #[test]
+    fn render_without_sha256_omits_checksum_suffix() {
+        let mut plugins = HashMap::new();
+        plugins.insert(
+            "git".to_string(),
+            make_plugin("git", "5.7.0", Some("aabbccdd")),
+        );
+        let rendered = render(&plugins, "2.452.4", "git\n", false);
+        assert!(rendered.contains("git:5.7.0\n"));
+        assert!(!rendered.contains("sha256:"));
     }
 }

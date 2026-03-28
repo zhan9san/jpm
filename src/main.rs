@@ -74,6 +74,10 @@ struct LockArgs {
     /// version whose `requiredCore` ≤ `--jenkins-version` (superset of --fix).
     #[arg(long)]
     upgrade: bool,
+
+    /// Omit `sha256:` suffix in generated lock entries.
+    #[arg(long)]
+    no_sha256: bool,
 }
 
 // ── jpm install ───────────────────────────────────────────────────────────────
@@ -394,7 +398,12 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
 
     let current_manifest =
         std::fs::read_to_string(&args.plugin_file).unwrap_or_else(|_| manifest_text.clone());
-    let lock_content = lockfile::render(&resolved, &args.jenkins_version, &current_manifest);
+    let lock_content = lockfile::render(
+        &resolved,
+        &args.jenkins_version,
+        &current_manifest,
+        !args.no_sha256,
+    );
     std::fs::write(&args.output, &lock_content)
         .with_context(|| format!("writing lock file '{}'", args.output.display()))?;
 
