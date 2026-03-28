@@ -293,6 +293,40 @@ async fn lock_upgrade_bumps_pinned_versions() {
     );
 }
 
+/// `--no-sha256` writes plain `name:version` lock entries.
+#[tokio::test]
+async fn lock_no_sha256_omits_checksum_suffix() {
+    let mock = start_mock_uc().await;
+    let tmp = TempDir::new().unwrap();
+
+    fs::write(tmp.path().join("plugins.txt"), "git\n").unwrap();
+
+    jpm(&mock, &tmp)
+        .args([
+            "lock",
+            "-j",
+            JENKINS_VERSION,
+            "--skip-bundled",
+            "--no-sha256",
+            "-f",
+            tmp.path().join("plugins.txt").to_str().unwrap(),
+            "-o",
+            tmp.path().join("plugins-lock.txt").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let lock = fs::read_to_string(tmp.path().join("plugins-lock.txt")).unwrap();
+    assert!(
+        lock.contains("git:5.7.0"),
+        "lock should include plugin version:\n{lock}"
+    );
+    assert!(
+        !lock.contains("sha256:"),
+        "lock should not include checksum suffixes:\n{lock}"
+    );
+}
+
 /// Running `jpm lock` twice with the same inputs produces identical lock files.
 #[tokio::test]
 async fn lock_is_deterministic() {
