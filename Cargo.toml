@@ -1,6 +1,6 @@
 [package]
 name = "jpm"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Jenkins Plugin Manager - generates reproducible plugin lock files"
 license = "MIT"
