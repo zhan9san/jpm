@@ -647,4 +647,43 @@ mod tests {
         let resolved = resolve(&requests, &uc);
         assert_eq!(resolved["b"].version, "2.0.0");
     }
+
+    #[test]
+    fn resolve_keeps_newer_dash_build_version_over_older_dependency_floor() {
+        // subversion:2.17.1 requires mapdb-api:1.0.9.0 (2016), which is older
+        // than the pinned 1.0.9-28.vf251ce40855d (2022) in Jenkins' ordering.
+        let uc = make_uc_for_compat(json!({
+            "plugins": {
+                "mapdb-api": {
+                    "1.0.9.0": { "dependencies": [] },
+                    "1.0.9-28.vf251ce40855d": { "dependencies": [] }
+                },
+                "subversion": {
+                    "2.17.1": {
+                        "dependencies": [
+                            { "name": "mapdb-api", "version": "1.0.9.0", "optional": false }
+                        ]
+                    }
+                }
+            }
+        }));
+
+        let requests = vec![
+            PluginRequest {
+                name: "mapdb-api".to_string(),
+                version: VersionSpec::Pinned("1.0.9-28.vf251ce40855d".to_string()),
+                url: None,
+            },
+            PluginRequest {
+                name: "subversion".to_string(),
+                version: VersionSpec::Pinned("2.17.1".to_string()),
+                url: None,
+            },
+        ];
+
+        let resolved = resolve(&requests, &uc);
+        assert_eq!(resolved["mapdb-api"].version, "1.0.9-28.vf251ce40855d");
+        assert!(resolved["mapdb-api"].is_direct);
+        assert_eq!(resolved["subversion"].version, "2.17.1");
+    }
 }
