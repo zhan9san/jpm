@@ -37,7 +37,7 @@ plugins.txt            +      plugins-lock.txt          (jpm)
 | **Bundled runtime detection** | ❌ | ❌ | ❌ | ✅ WAR pom.xml |
 | **Parallel downloads** | ✅ | ❌ | ✅ | ✅ tokio tasks |
 | **Local cache** | `~/.npm` | pip cache | `~/.cache/pypoetry` | `~/.cache/jpm` |
-| **Offline mode** | ✅ | ✅ | ✅ | ❌ |
+| **Offline mode** | ✅ | ✅ | ✅ | partial (stale cache) |
 
 ---
 
@@ -241,5 +241,5 @@ The pom.xml for a tagged release is immutable, so it is cached permanently at
 |---|---|
 | Version ranges | Jenkins UC only exposes exact minimum constraints — ecosystem limitation |
 | `jpm update <plugin>` | Targeted single-plugin update not yet implemented |
-| Offline mode | No fallback when UC endpoints are unreachable |
+| Offline mode | Falls back to an expired UC cache when endpoints are unreachable; no explicit `--offline` flag |
 | Direct vs transitive in lock | Tracked internally but not written to lock file |

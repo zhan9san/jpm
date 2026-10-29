@@ -1,6 +1,7 @@
 mod bundled;
 mod detached;
 mod doctor;
+mod fetch;
 mod graph;
 mod installer;
 mod lockfile;
