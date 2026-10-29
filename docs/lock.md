@@ -100,6 +100,7 @@ so existing setups (for example the official Docker image) keep working. The
 | `JENKINS_PLUGIN_INFO` | `plugin-versions.json` URL |
 | `CACHE_DIR` | Cache root; JPM uses `$CACHE_DIR/jpm` |
 | `JENKINS_UC_DOWNLOAD_URL`, `JENKINS_UC_DOWNLOAD` | Plugin download base (see [install](install.md#download-url-construction)) |
+| `JENKINS_UC_CREDENTIALS` | Global `--credentials`: comma-separated `host[:port]:username:password` for basic auth against private mirrors; only sent to the matching host (and port, when given) |
 
 ## Compatibility behavior
 

@@ -963,3 +963,88 @@ async fn install_reads_plugin_dir_and_jenkins_uc_from_env() {
 
     assert_eq!(fs::read(plugin_dir.join("git.jpi")).unwrap(), git);
 }
+
+/// `JENKINS_UC_CREDENTIALS` adds basic auth for the matching host:port only,
+/// for both Update Center metadata and plugin downloads.
+#[tokio::test]
+async fn credentials_are_sent_only_to_matching_mirror() {
+    use wiremock::matchers::header;
+
+    let mock = start_mock_uc().await;
+    let private = MockServer::start().await;
+    // "user:pa:ss" → Basic dXNlcjpwYTpzcw==
+    let auth = "Basic dXNlcjpwYTpzcw==";
+    let git = plugin_archive("git", "5.7.0");
+    Mock::given(method("GET"))
+        .and(path("/uc-stable"))
+        .and(header("authorization", auth))
+        .respond_with(ResponseTemplate::new(200).set_body_string(fixture("uc-stable.json")))
+        .mount(&private)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/dl/git/5.7.0/git.hpi"))
+        .and(header("authorization", auth))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(git.clone()))
+        .mount(&private)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&private)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let port = private.address().port();
+    let creds = format!("127.0.0.1:{port}:user:pa:ss");
+    fs::write(tmp.path().join("plugins.txt"), "git\n").unwrap();
+
+    jpm(&mock, &tmp)
+        .env(
+            "JPM_UC_STABLE_URL",
+            format!("{}/uc-stable?version=", private.uri()),
+        )
+        .env("JENKINS_UC_CREDENTIALS", &creds)
+        .args([
+            "lock",
+            "-j",
+            JENKINS_VERSION,
+            "--skip-bundled",
+            "--no-sha256",
+            "-f",
+            tmp.path().join("plugins.txt").to_str().unwrap(),
+            "-o",
+            tmp.path().join("plugins-lock.txt").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let lock = fs::read_to_string(tmp.path().join("plugins-lock.txt")).unwrap();
+    assert!(lock.contains("git:5.7.0"), "lock:\n{lock}");
+
+    fs::write(
+        tmp.path().join("git-lock.txt"),
+        format!("# Jenkins: {JENKINS_VERSION}\n\ngit:5.7.0\n"),
+    )
+    .unwrap();
+    Command::cargo_bin("jpm")
+        .unwrap()
+        .env("JENKINS_UC_DOWNLOAD_URL", format!("{}/dl", private.uri()))
+        .args([
+            "install",
+            "--credentials",
+            &creds,
+            "-l",
+            tmp.path().join("git-lock.txt").to_str().unwrap(),
+            "-d",
+            tmp.path().join("plugins").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(tmp.path().join("plugins/git.jpi")).unwrap(), git);
+
+    // The public mock is on another port and must never see the credentials.
+    let public = mock.received_requests().await.unwrap();
+    assert!(!public.is_empty());
+    assert!(public
+        .iter()
+        .all(|r| !r.headers.contains_key("authorization")));
+}
