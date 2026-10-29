@@ -867,3 +867,99 @@ async fn lock_reports_security_warnings() {
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
     assert!(!stderr.contains("security warnings"), "stderr:\n{stderr}");
 }
+
+/// `jpm lock` reads the plugin-installation-manager-tool variables:
+/// `JENKINS_VERSION` instead of `-j`, `JENKINS_UC` as a base URL (with the
+/// JSONP-wrapped `update-center.json` behind it), `JENKINS_PLUGIN_INFO` and
+/// `CACHE_DIR`.
+#[tokio::test]
+async fn lock_reads_pimt_environment_variables() {
+    use wiremock::matchers::query_param;
+
+    let mock = start_mock_uc().await;
+    Mock::given(method("GET"))
+        .and(path("/mirror/update-center.json"))
+        .and(query_param("version", JENKINS_VERSION))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            "updateCenter.post(\n{}\n);",
+            fixture("uc-stable.json")
+        )))
+        .mount(&mock)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let base = mock.uri();
+    fs::write(tmp.path().join("plugins.txt"), "git\n").unwrap();
+
+    Command::cargo_bin("jpm")
+        .unwrap()
+        .env_remove("JPM_UC_STABLE_URL")
+        .env_remove("JPM_UC_PLUGIN_VERSIONS_URL")
+        .env_remove("JPM_CACHE_DIR")
+        .env("JENKINS_VERSION", JENKINS_VERSION)
+        .env("JENKINS_UC", format!("{base}/mirror"))
+        .env("JENKINS_PLUGIN_INFO", format!("{base}/plugin-versions"))
+        .env("CACHE_DIR", tmp.path().join("cache"))
+        .env("JPM_JENKINS_GH_BASE", format!("{base}/jenkins/jenkins-"))
+        .args([
+            "lock",
+            "--skip-bundled",
+            "-f",
+            tmp.path().join("plugins.txt").to_str().unwrap(),
+            "-o",
+            tmp.path().join("plugins-lock.txt").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let lock = fs::read_to_string(tmp.path().join("plugins-lock.txt")).unwrap();
+    assert!(lock.contains("# Jenkins: 2.452.4"), "lock:\n{lock}");
+    assert!(lock.contains("git:5.7.0"), "lock:\n{lock}");
+    assert!(tmp
+        .path()
+        .join("cache/jpm")
+        .join(format!("uc-{JENKINS_VERSION}.json"))
+        .exists());
+}
+
+/// `jpm install` reads `PLUGIN_DIR`, and without a download override fetches
+/// plugins from `<JENKINS_UC origin>/download/plugins/...`.
+#[tokio::test]
+async fn install_reads_plugin_dir_and_jenkins_uc_from_env() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let plugin_dir = tmp.path().join("ref-plugins");
+
+    let git = plugin_archive("git", "5.7.0");
+    Mock::given(method("GET"))
+        .and(path("/download/plugins/git/5.7.0/git.hpi"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(git.clone()))
+        .mount(&server)
+        .await;
+    fs::write(
+        tmp.path().join("plugins-lock.txt"),
+        format!(
+            "# Jenkins: {JENKINS_VERSION}\n\ngit:5.7.0 sha256:{}\n",
+            sha256_b64(&git)
+        ),
+    )
+    .unwrap();
+
+    Command::cargo_bin("jpm")
+        .unwrap()
+        .env_remove("JENKINS_UC_DOWNLOAD_URL")
+        .env_remove("JENKINS_UC_DOWNLOAD")
+        .env(
+            "JENKINS_UC",
+            format!("{}/some/path/update-center.json", server.uri()),
+        )
+        .env("PLUGIN_DIR", &plugin_dir)
+        .args([
+            "install",
+            "-l",
+            tmp.path().join("plugins-lock.txt").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(plugin_dir.join("git.jpi")).unwrap(), git);
+}
