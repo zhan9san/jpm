@@ -663,3 +663,53 @@ async fn install_rejects_checksum_mismatch() {
     assert!(!plugin_dir.join("git.jpi").exists());
     assert!(jpm_leftovers(&plugin_dir).is_empty());
 }
+
+/// Without a checksum in the lock, a mirror answering with an HTML page (or
+/// the wrong plugin) is caught by the archive check instead of being
+/// installed as `<name>.jpi`.
+#[tokio::test]
+async fn install_rejects_archive_that_is_not_the_locked_plugin() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let plugin_dir = tmp.path().join("plugins");
+
+    fs::write(
+        tmp.path().join("plugins-lock.txt"),
+        format!("# Jenkins: {JENKINS_VERSION}\n\ngit:5.7.0\nmailer:1.0\n"),
+    )
+    .unwrap();
+    mount_plugin(
+        &server,
+        "git",
+        "5.7.0",
+        b"<html>mirror error</html>".to_vec(),
+    )
+    .await;
+    mount_plugin(&server, "mailer", "1.0", plugin_archive("mailer", "0.9")).await;
+
+    let assert = Command::cargo_bin("jpm")
+        .unwrap()
+        .env("JENKINS_UC_DOWNLOAD_URL", format!("{}/dl", server.uri()))
+        .args([
+            "install",
+            "-l",
+            tmp.path().join("plugins-lock.txt").to_str().unwrap(),
+            "-d",
+            plugin_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("git: downloaded file is not a plugin archive"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("mailer: downloaded archive is version 0.9, lock file says 1.0"),
+        "stderr:\n{stderr}"
+    );
+
+    assert!(!plugin_dir.join("git.jpi").exists());
+    assert!(!plugin_dir.join("mailer.jpi").exists());
+    assert!(jpm_leftovers(&plugin_dir).is_empty());
+}

@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
 use crate::lockfile;
+use crate::manifest;
 
 pub struct DoctorOptions {
     pub lock_file: PathBuf,
@@ -209,7 +209,7 @@ fn scan_plugin_files(dir: &Path) -> Result<Vec<PluginFile>> {
             continue;
         }
 
-        let (plugin_name, version) = match read_plugin_manifest(&path) {
+        let (plugin_name, version) = match manifest::read_plugin_manifest(&path) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("  warning: skipping '{}': {e}", path.display());
@@ -233,59 +233,6 @@ fn scan_plugin_files(dir: &Path) -> Result<Vec<PluginFile>> {
     }
 
     Ok(out)
-}
-
-fn read_plugin_manifest(path: &Path) -> Result<(String, String)> {
-    let file =
-        std::fs::File::open(path).with_context(|| format!("opening '{}'", path.display()))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .with_context(|| format!("'{}' is not a valid ZIP/HPI", path.display()))?;
-
-    let mut entry = archive
-        .by_name("META-INF/MANIFEST.MF")
-        .with_context(|| format!("no META-INF/MANIFEST.MF in '{}'", path.display()))?;
-
-    let mut content = String::new();
-    entry.read_to_string(&mut content)?;
-
-    let headers = parse_manifest_headers(&content);
-    let plugin_name = headers
-        .get("Short-Name")
-        .cloned()
-        .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
-        .with_context(|| format!("cannot determine plugin name from '{}'", path.display()))?;
-    let version = headers
-        .get("Plugin-Version")
-        .cloned()
-        .with_context(|| format!("no Plugin-Version in '{}'", path.display()))?;
-
-    Ok((plugin_name, version))
-}
-
-fn parse_manifest_headers(content: &str) -> HashMap<String, String> {
-    let mut map: HashMap<String, String> = HashMap::new();
-    let mut current_key: Option<String> = None;
-    let mut current_val = String::new();
-
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix(' ') {
-            current_val.push_str(rest);
-        } else {
-            if let Some(key) = current_key.take() {
-                map.insert(key, current_val.trim_end().to_string());
-                current_val.clear();
-            }
-            if let Some((k, v)) = line.split_once(':') {
-                current_key = Some(k.to_string());
-                current_val = v.trim_start().to_string();
-            }
-        }
-    }
-    if let Some(key) = current_key {
-        map.insert(key, current_val.trim_end().to_string());
-    }
-
-    map
 }
 
 #[cfg(test)]
