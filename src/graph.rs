@@ -43,18 +43,25 @@ pub async fn run(client: &reqwest::Client, args: GraphArgs) -> Result<()> {
         }
     };
 
+    let requests = match &args.plugin_file {
+        Some(plugin_file) => {
+            let content = std::fs::read_to_string(plugin_file)
+                .with_context(|| format!("reading manifest '{}'", plugin_file.display()))?;
+            Some(parser::parse_plugins_txt(&content).context("parsing plugins.txt")?)
+        }
+        None => None,
+    };
+    let with_experimental = requests.as_deref().is_some_and(parser::uses_experimental);
+
     let (uc, bundled, detached) = tokio::try_join!(
-        UpdateCenter::fetch(client, &args.jenkins_version),
+        UpdateCenter::fetch(client, &args.jenkins_version, with_experimental),
         bundled_fut,
         detached::fetch(client, &args.jenkins_version),
     )
     .context("fetching remote data")?;
 
-    let resolved = if let Some(plugin_file) = &args.plugin_file {
-        let content = std::fs::read_to_string(plugin_file)
-            .with_context(|| format!("reading manifest '{}'", plugin_file.display()))?;
-        let requests = parser::parse_plugins_txt(&content).context("parsing plugins.txt")?;
-        resolver::resolve(&requests, &uc)
+    let resolved = if let Some(requests) = &requests {
+        resolver::resolve(requests, &uc)
     } else {
         let lock_file = args.lock_file.as_ref().expect("lock_file present");
         let content = std::fs::read_to_string(lock_file)

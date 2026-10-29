@@ -103,12 +103,9 @@ Spawn one `tokio` task per plugin that needs downloading. Each task:
    https://updates.jenkins.io/download/plugins/<name>/<version>/<name>.hpi
    ```
 
-   Respect the `JENKINS_UC_DOWNLOAD` environment variable as an override
-   (mirrors the Java tool's behaviour):
-
-   ```text
-   $JENKINS_UC_DOWNLOAD/plugins/<name>/<version>/<name>.hpi
-   ```
+   Respect the `JENKINS_UC_DOWNLOAD_URL` and (deprecated)
+   `JENKINS_UC_DOWNLOAD` environment variables as overrides (mirrors the Java
+   tool's behaviour, see [Download URL Construction](#download-url-construction)).
 
 2. Download to a temporary file inside a `tempdir` (not directly to the
    plugin dir — avoids partial files being picked up by Jenkins).
@@ -151,6 +148,10 @@ Once verified, move the temp file to its final location:
 Use `std::fs::rename` (atomic on the same filesystem). If `rename` fails
 (cross-device move), fall back to copy + delete.
 
+If `<plugin-dir>/<name>.jpi` already exists, it is first moved to
+`<plugin-dir>/<name>.bak` (replacing an older backup). Jenkins offers that
+file as "Downgrade to …" in its plugin manager.
+
 ### 7. Error handling
 
 | Mode | Behaviour on failure |
@@ -173,7 +174,8 @@ Priority order (mirrors the Java plugin manager):
 
 | Condition | URL used |
 |---|---|
-| `JENKINS_UC_DOWNLOAD` env var is set | `$JENKINS_UC_DOWNLOAD/plugins/<n>/<v>/<n>.hpi` |
+| `JENKINS_UC_DOWNLOAD_URL` env var is set | `$JENKINS_UC_DOWNLOAD_URL/<n>/<v>/<n>.hpi` |
+| `JENKINS_UC_DOWNLOAD` env var is set (deprecated) | `$JENKINS_UC_DOWNLOAD/plugins/<n>/<v>/<n>.hpi` |
 | Standard case | `https://updates.jenkins.io/download/plugins/<n>/<v>/<n>.hpi` |
 | Mirror fails | `https://archives.jenkins.io/plugins/<n>/<v>/<n>.hpi` |
 
