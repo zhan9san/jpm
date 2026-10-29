@@ -26,9 +26,13 @@ pub async fn run(client: &reqwest::Client, opts: RootsOptions) -> Result<()> {
     let requests = parser::parse_plugins_txt(&manifest_text).context("parsing plugins.txt")?;
     println!("  {} plugin(s) in manifest", requests.len());
 
-    let uc = UpdateCenter::fetch(client, &opts.jenkins_version)
-        .await
-        .context("fetching update center data")?;
+    let uc = UpdateCenter::fetch(
+        client,
+        &opts.jenkins_version,
+        parser::uses_experimental(&requests),
+    )
+    .await
+    .context("fetching update center data")?;
     let resolved = resolver::resolve(&requests, &uc);
 
     let compat_issues = resolver::check_compat(&resolved, &uc, &opts.jenkins_version);

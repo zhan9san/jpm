@@ -83,6 +83,13 @@ pub fn parse_plugins_txt(content: &str) -> Result<Vec<PluginRequest>> {
     Ok(plugins)
 }
 
+/// True when any request needs the experimental Update Center.
+pub fn uses_experimental(requests: &[PluginRequest]) -> bool {
+    requests
+        .iter()
+        .any(|r| r.version == VersionSpec::Experimental)
+}
+
 /// Rewrite `content` (a `plugins.txt` string) replacing the version of any
 /// plugin listed in `updates` with the corresponding new version string.
 ///

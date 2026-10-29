@@ -20,8 +20,15 @@ pub struct UpdateCenter {
 }
 
 impl UpdateCenter {
-    /// Fetch all three UC endpoints concurrently, using the disk cache when fresh.
-    pub async fn fetch(client: &reqwest::Client, jenkins_version: &str) -> Result<Self> {
+    /// Fetch the UC endpoints concurrently, using the disk cache when fresh.
+    ///
+    /// The experimental UC is only fetched when `with_experimental` is set,
+    /// i.e. when some plugin is requested as `:experimental`.
+    pub async fn fetch(
+        client: &reqwest::Client,
+        jenkins_version: &str,
+        with_experimental: bool,
+    ) -> Result<Self> {
         let cache_dir = cache_dir();
         tokio::fs::create_dir_all(&cache_dir).await?;
 
@@ -38,9 +45,17 @@ impl UpdateCenter {
         let experimental_cache = cache_dir.join("uc-experimental.json");
         let plugin_versions_cache = cache_dir.join("plugin-versions.json");
 
+        let experimental_fut = async {
+            if with_experimental {
+                fetch_json(client, &experimental_url, &experimental_cache).await
+            } else {
+                Ok(Value::Null)
+            }
+        };
+
         let (stable, experimental, plugin_versions) = tokio::try_join!(
             fetch_json(client, &stable_url, &stable_cache),
-            fetch_json(client, &experimental_url, &experimental_cache),
+            experimental_fut,
             fetch_json(client, &plugin_versions_url, &plugin_versions_cache),
         )
         .context("fetching Update Center endpoints")?;
@@ -185,6 +200,22 @@ mod tests {
     }
 
     #[test]
+    fn strip_jsonp_wrapper_unwraps_update_center_post() {
+        let wrapped = "updateCenter.post(\n{\"plugins\": {}}\n);\n";
+        assert_eq!(strip_jsonp_wrapper(wrapped).trim(), "{\"plugins\": {}}");
+        assert_eq!(
+            strip_jsonp_wrapper("updateCenter.post({\"a\":1})"),
+            "{\"a\":1}"
+        );
+    }
+
+    #[test]
+    fn strip_jsonp_wrapper_leaves_plain_json_alone() {
+        let plain = "{\"plugins\": {}}";
+        assert_eq!(strip_jsonp_wrapper(plain), plain);
+    }
+
+    #[test]
     fn highest_compatible_unknown_plugin() {
         let uc = make_uc(json!({ "plugins": {} }));
         let best = uc.highest_compatible_version("unknown", &JenkinsVersion::new("2.452.4"));
@@ -222,12 +253,28 @@ async fn fetch_json(client: &reqwest::Client, url: &str, cache_path: &Path) -> R
         .with_context(|| format!("non-2xx from {url}"))?
         .text()
         .await?;
+    let text = strip_jsonp_wrapper(&text);
 
     let json: Value =
-        serde_json::from_str(&text).with_context(|| format!("parsing JSON from {url}"))?;
+        serde_json::from_str(text).with_context(|| format!("parsing JSON from {url}"))?;
 
-    tokio::fs::write(cache_path, &text).await?;
+    tokio::fs::write(cache_path, text).await?;
     Ok(json)
+}
+
+/// `update-center.json` (unlike `update-center.actual.json`) is JSONP:
+/// `updateCenter.post({...});`. Return the JSON inside the wrapper, or the
+/// input unchanged when there is no wrapper.
+fn strip_jsonp_wrapper(text: &str) -> &str {
+    let trimmed = text.trim();
+    trimmed
+        .strip_prefix("updateCenter.post(")
+        .and_then(|rest| {
+            let rest = rest.trim_end();
+            let rest = rest.strip_suffix(';').unwrap_or(rest).trim_end();
+            rest.strip_suffix(')')
+        })
+        .unwrap_or(text)
 }
 
 async fn try_load_cache(path: &Path) -> Option<Value> {

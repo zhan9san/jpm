@@ -493,3 +493,50 @@ async fn install_dry_run_succeeds() {
         .assert()
         .success();
 }
+
+/// `jpm lock` only fetches the experimental Update Center when a plugin is
+/// requested as `:experimental`.
+#[tokio::test]
+async fn lock_skips_experimental_uc_unless_requested() {
+    let mock = start_mock_uc().await;
+    let tmp = TempDir::new().unwrap();
+    let experimental_hits = |reqs: &[wiremock::Request]| {
+        reqs.iter()
+            .filter(|r| r.url.path() == "/uc-experimental")
+            .count()
+    };
+
+    fs::write(tmp.path().join("plugins.txt"), "git\n").unwrap();
+    jpm(&mock, &tmp)
+        .args([
+            "lock",
+            "-j",
+            JENKINS_VERSION,
+            "--skip-bundled",
+            "-f",
+            tmp.path().join("plugins.txt").to_str().unwrap(),
+            "-o",
+            tmp.path().join("plugins-lock.txt").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let reqs = mock.received_requests().await.unwrap();
+    assert_eq!(experimental_hits(&reqs), 0, "experimental UC was fetched");
+
+    fs::write(tmp.path().join("plugins.txt"), "git:experimental\n").unwrap();
+    jpm(&mock, &tmp)
+        .args([
+            "lock",
+            "-j",
+            JENKINS_VERSION,
+            "--skip-bundled",
+            "-f",
+            tmp.path().join("plugins.txt").to_str().unwrap(),
+            "-o",
+            tmp.path().join("plugins-lock.txt").to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let reqs = mock.received_requests().await.unwrap();
+    assert_eq!(experimental_hits(&reqs), 1, "experimental UC not fetched");
+}

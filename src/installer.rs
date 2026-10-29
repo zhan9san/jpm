@@ -248,9 +248,12 @@ async fn download_with_retry(
     name: &str,
     version: &str,
 ) -> Result<Vec<u8>> {
-    // Honour the mirror override used by the Java plugin manager.
-    let base = std::env::var("JENKINS_UC_DOWNLOAD").unwrap_or_else(|_| PRIMARY_BASE.to_string());
-    let primary_url = format!("{base}/{name}/{version}/{name}.hpi");
+    let primary_url = primary_download_url(
+        std::env::var("JENKINS_UC_DOWNLOAD_URL").ok().as_deref(),
+        std::env::var("JENKINS_UC_DOWNLOAD").ok().as_deref(),
+        name,
+        version,
+    );
 
     let mut last_err = None;
 
@@ -281,6 +284,31 @@ async fn download_with_retry(
             Some(e) => format!("downloading {name}:{version} failed (primary: {e})"),
             None => format!("downloading {name}:{version} failed"),
         })
+}
+
+/// Build the primary download URL, honouring the mirror overrides of the Java
+/// plugin manager:
+///
+/// - `JENKINS_UC_DOWNLOAD_URL` is the full base: `<base>/<n>/<v>/<n>.hpi`
+/// - `JENKINS_UC_DOWNLOAD` (deprecated) gets `/plugins` appended:
+///   `<base>/plugins/<n>/<v>/<n>.hpi`
+///
+/// `JENKINS_UC_DOWNLOAD_URL` wins when both are set; empty values are ignored.
+fn primary_download_url(
+    download_url: Option<&str>,
+    legacy_download: Option<&str>,
+    name: &str,
+    version: &str,
+) -> String {
+    fn non_empty(v: Option<&str>) -> Option<&str> {
+        v.map(|s| s.trim_end_matches('/')).filter(|s| !s.is_empty())
+    }
+    let base = match (non_empty(download_url), non_empty(legacy_download)) {
+        (Some(base), _) => base.to_string(),
+        (None, Some(legacy)) => format!("{legacy}/plugins"),
+        (None, None) => PRIMARY_BASE.to_string(),
+    };
+    format!("{base}/{name}/{version}/{name}.hpi")
 }
 
 async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
@@ -318,6 +346,9 @@ fn verify_sha256(bytes: &[u8], expected: Option<&str>, name: &str) -> Result<()>
 /// Write `bytes` to `<plugin_dir>/<name>.jpi` via a temporary file to avoid
 /// Jenkins picking up an incomplete download.
 ///
+/// An existing `<name>.jpi` is kept as `<name>.bak`, which is the file the
+/// Jenkins plugin manager offers for "Downgrade to …".
+///
 /// Uses `tokio::fs::rename` (atomic on the same filesystem). Falls back to
 /// copy + delete when source and destination are on different devices.
 async fn write_atomically(plugin_dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
@@ -328,6 +359,8 @@ async fn write_atomically(plugin_dir: &Path, name: &str, bytes: &[u8]) -> Result
         .await
         .with_context(|| format!("writing temp file for {name}"))?;
 
+    backup_existing(plugin_dir, name).await?;
+
     if tokio::fs::rename(&tmp_path, &final_path).await.is_err() {
         // Cross-device fallback: copy then delete the temp file.
         tokio::fs::copy(&tmp_path, &final_path)
@@ -337,6 +370,24 @@ async fn write_atomically(plugin_dir: &Path, name: &str, bytes: &[u8]) -> Result
     }
 
     Ok(())
+}
+
+/// Move `<plugin_dir>/<name>.jpi` to `<name>.bak`, replacing an older backup.
+/// Does nothing when the plugin is not installed yet.
+async fn backup_existing(plugin_dir: &Path, name: &str) -> Result<()> {
+    let current = plugin_dir.join(format!("{name}.jpi"));
+    if !tokio::fs::try_exists(&current).await.unwrap_or(false) {
+        return Ok(());
+    }
+    let backup = plugin_dir.join(format!("{name}.bak"));
+    match tokio::fs::remove_file(&backup).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("removing old backup for {name}")),
+    }
+    tokio::fs::rename(&current, &backup)
+        .await
+        .with_context(|| format!("backing up {name}.jpi to {name}.bak"))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -362,6 +413,64 @@ mod tests {
             "Git plugin with a very long name continued here"
         );
         assert_eq!(headers["Plugin-Version"], "5.7.0");
+    }
+
+    #[test]
+    fn download_url_defaults_to_update_center() {
+        assert_eq!(
+            primary_download_url(None, None, "git", "5.7.0"),
+            "https://updates.jenkins.io/download/plugins/git/5.7.0/git.hpi"
+        );
+    }
+
+    #[test]
+    fn download_url_uses_full_base_from_download_url_env() {
+        assert_eq!(
+            primary_download_url(Some("https://m.example/dl/plugins/"), None, "git", "5.7.0"),
+            "https://m.example/dl/plugins/git/5.7.0/git.hpi"
+        );
+    }
+
+    #[test]
+    fn download_url_appends_plugins_to_legacy_env() {
+        assert_eq!(
+            primary_download_url(None, Some("https://m.example/download"), "git", "5.7.0"),
+            "https://m.example/download/plugins/git/5.7.0/git.hpi"
+        );
+    }
+
+    #[test]
+    fn download_url_prefers_download_url_over_legacy_and_skips_empty() {
+        assert_eq!(
+            primary_download_url(
+                Some("https://new.example/p"),
+                Some("https://old.example"),
+                "git",
+                "5.7.0"
+            ),
+            "https://new.example/p/git/5.7.0/git.hpi"
+        );
+        assert_eq!(
+            primary_download_url(Some(""), Some("https://old.example"), "git", "5.7.0"),
+            "https://old.example/plugins/git/5.7.0/git.hpi"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_atomically_keeps_previous_archive_as_bak() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        write_atomically(dir, "git", b"v1").await.unwrap();
+        assert!(!dir.join("git.bak").exists(), "fresh install has no backup");
+
+        write_atomically(dir, "git", b"v2").await.unwrap();
+        assert_eq!(std::fs::read(dir.join("git.jpi")).unwrap(), b"v2");
+        assert_eq!(std::fs::read(dir.join("git.bak")).unwrap(), b"v1");
+
+        write_atomically(dir, "git", b"v3").await.unwrap();
+        assert_eq!(std::fs::read(dir.join("git.jpi")).unwrap(), b"v3");
+        assert_eq!(std::fs::read(dir.join("git.bak")).unwrap(), b"v2");
     }
 
     #[test]

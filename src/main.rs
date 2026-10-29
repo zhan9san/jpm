@@ -230,7 +230,11 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
     };
 
     let (uc, bundled, detached) = tokio::try_join!(
-        update_center::UpdateCenter::fetch(client, &args.jenkins_version),
+        update_center::UpdateCenter::fetch(
+            client,
+            &args.jenkins_version,
+            parser::uses_experimental(&requests),
+        ),
         bundled_fut,
         detached::fetch(client, &args.jenkins_version),
     )
