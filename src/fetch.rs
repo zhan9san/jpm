@@ -15,15 +15,24 @@ const RETRY_BASE: Duration = Duration::from_millis(300);
 #[cfg(test)]
 const RETRY_BASE: Duration = Duration::from_millis(10);
 
-/// Directory for cached remote metadata: `$JPM_CACHE_DIR`, or `jpm` under the
-/// platform cache directory.
+/// Directory for cached remote metadata: `$JPM_CACHE_DIR`, else `jpm` under
+/// `$CACHE_DIR` (the variable plugin-installation-manager-tool uses), else
+/// `jpm` under the platform cache directory.
 pub fn cache_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("JPM_CACHE_DIR") {
+    if let Some(dir) = env_non_empty("JPM_CACHE_DIR") {
         return PathBuf::from(dir);
+    }
+    if let Some(dir) = env_non_empty("CACHE_DIR") {
+        return PathBuf::from(dir).join("jpm");
     }
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from(".cache"))
         .join("jpm")
+}
+
+/// Value of environment variable `name`, treating an empty value as unset.
+pub fn env_non_empty(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
 /// GET `url` as text, retrying network errors, 5xx and 429 responses with

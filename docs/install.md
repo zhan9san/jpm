@@ -187,6 +187,7 @@ Priority order (mirrors the Java plugin manager):
 |---|---|
 | `JENKINS_UC_DOWNLOAD_URL` env var is set | `$JENKINS_UC_DOWNLOAD_URL/<n>/<v>/<n>.hpi` |
 | `JENKINS_UC_DOWNLOAD` env var is set (deprecated) | `$JENKINS_UC_DOWNLOAD/plugins/<n>/<v>/<n>.hpi` |
+| `JENKINS_UC` env var is set | `<scheme://host:port of JENKINS_UC>/download/plugins/<n>/<v>/<n>.hpi` |
 | Standard case | `https://updates.jenkins.io/download/plugins/<n>/<v>/<n>.hpi` |
 | Mirror fails | `https://archives.jenkins.io/plugins/<n>/<v>/<n>.hpi` |
 

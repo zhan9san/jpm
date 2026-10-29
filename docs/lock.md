@@ -87,6 +87,20 @@ accept or use JPM's checksum suffix format.
 Use this mode when you need strict compatibility with that installer input
 format.
 
+JPM also reads the environment variables of plugin-installation-manager-tool,
+so existing setups (for example the official Docker image) keep working. The
+`JPM_*` variables and explicit flags take priority.
+
+| Variable | Used for |
+|---|---|
+| `JENKINS_VERSION` | `-j/--jenkins-version` of `lock`, `graph`, `roots` |
+| `PLUGIN_DIR` | `-d/--plugin-dir` of `install`, `doctor` |
+| `JENKINS_UC` | Stable Update Center: a `.json` URL, or a base URL that `/update-center.json` is appended to; `?version=<jenkins>` is added |
+| `JENKINS_UC_EXPERIMENTAL` | Experimental Update Center (same URL rules) |
+| `JENKINS_PLUGIN_INFO` | `plugin-versions.json` URL |
+| `CACHE_DIR` | Cache root; JPM uses `$CACHE_DIR/jpm` |
+| `JENKINS_UC_DOWNLOAD_URL`, `JENKINS_UC_DOWNLOAD` | Plugin download base (see [install](install.md#download-url-construction)) |
+
 ## Compatibility behavior
 
 During lock, JPM checks each resolved plugin version against

@@ -47,7 +47,7 @@ enum Command {
 #[derive(Args, Debug)]
 struct LockArgs {
     /// Jenkins version to target (e.g. `2.452.4`).
-    #[arg(short = 'j', long, value_name = "VERSION")]
+    #[arg(short = 'j', long, value_name = "VERSION", env = "JENKINS_VERSION")]
     jenkins_version: String,
 
     /// Path to the input `plugins.txt` manifest.
@@ -101,7 +101,13 @@ struct InstallArgs {
     lock: PathBuf,
 
     /// Directory to install plugins into.
-    #[arg(short = 'd', long, value_name = "DIR", default_value = "plugins")]
+    #[arg(
+        short = 'd',
+        long,
+        value_name = "DIR",
+        env = "PLUGIN_DIR",
+        default_value = "plugins"
+    )]
     plugin_dir: PathBuf,
 
     /// Warn on individual download failures instead of aborting.
@@ -136,7 +142,13 @@ struct DoctorArgs {
     lock: PathBuf,
 
     /// Directory containing installed plugin archives.
-    #[arg(short = 'd', long, value_name = "DIR", default_value = "plugins")]
+    #[arg(
+        short = 'd',
+        long,
+        value_name = "DIR",
+        env = "PLUGIN_DIR",
+        default_value = "plugins"
+    )]
     plugin_dir: PathBuf,
 
     /// Exit non-zero when any finding is detected.
@@ -149,7 +161,7 @@ struct DoctorArgs {
 #[derive(Args, Debug)]
 struct GraphArgs {
     /// Jenkins version to target (e.g. `2.452.4`).
-    #[arg(short = 'j', long, value_name = "VERSION")]
+    #[arg(short = 'j', long, value_name = "VERSION", env = "JENKINS_VERSION")]
     jenkins_version: String,
 
     /// Path to input plugins.txt manifest.
@@ -183,7 +195,7 @@ struct GraphArgs {
 #[derive(Args, Debug)]
 struct RootsArgs {
     /// Jenkins version to target (e.g. `2.452.4`).
-    #[arg(short = 'j', long, value_name = "VERSION")]
+    #[arg(short = 'j', long, value_name = "VERSION", env = "JENKINS_VERSION")]
     jenkins_version: String,
 
     /// Path to input plugins.txt manifest.
