@@ -815,3 +815,55 @@ async fn lock_falls_back_to_stale_cache_when_uc_is_down() {
     );
     assert_eq!(fs::read_to_string(&lock_file).unwrap(), expected);
 }
+
+/// `jpm lock` reports Update Center security warnings for locked plugin
+/// versions, suggests an unaffected version, and can be silenced.
+#[tokio::test]
+async fn lock_reports_security_warnings() {
+    let mock = start_mock_uc().await;
+    let tmp = TempDir::new().unwrap();
+    let manifest = tmp.path().join("plugins.txt");
+    let lock_file = tmp.path().join("plugins-lock.txt");
+    let lock_args = [
+        "lock",
+        "-j",
+        JENKINS_VERSION,
+        "--skip-bundled",
+        "-f",
+        manifest.to_str().unwrap(),
+        "-o",
+        lock_file.to_str().unwrap(),
+    ];
+
+    fs::write(&manifest, "mailer:300.0\n").unwrap();
+    let assert = jpm(&mock, &tmp).args(lock_args).assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("mailer:300.0 SECURITY-9999: Stored XSS vulnerability"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("not affected: mailer:472.vf7c289a_4b_c36"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("SECURITY-9998"),
+        "core warnings are ignored"
+    );
+    assert!(fs::read_to_string(&lock_file)
+        .unwrap()
+        .contains("mailer:300.0"));
+
+    let assert = jpm(&mock, &tmp)
+        .args(lock_args)
+        .arg("--hide-security-warnings")
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(!stderr.contains("SECURITY-9999"), "stderr:\n{stderr}");
+
+    fs::write(&manifest, "mailer\n").unwrap();
+    let assert = jpm(&mock, &tmp).args(lock_args).assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(!stderr.contains("security warnings"), "stderr:\n{stderr}");
+}
