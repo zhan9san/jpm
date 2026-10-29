@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use sha2::Digest as _;
+use tokio::io::AsyncWriteExt as _;
+use tokio::sync::Semaphore;
 
 use crate::lockfile;
 use crate::version::JenkinsVersion;
@@ -19,6 +22,8 @@ pub struct InstallOptions {
     pub plugin_dir: PathBuf,
     pub skip_failed: bool,
     pub dry_run: bool,
+    /// Maximum number of plugins downloaded at the same time.
+    pub concurrency: usize,
 }
 
 /// Top-level entry point: read lock file, scan existing plugins, download what
@@ -76,16 +81,23 @@ pub async fn install(client: &reqwest::Client, opts: &InstallOptions) -> Result<
         return Ok(());
     }
 
-    // 5. Spawn one tokio task per plugin and download concurrently.
+    // 5. Spawn one tokio task per plugin; a semaphore caps how many
+    //    downloads run at the same time.
     println!("downloading...");
 
+    let permits = Arc::new(Semaphore::new(opts.concurrency.max(1)));
     let mut handles = Vec::with_capacity(to_download.len());
 
     for (name, version, sha256) in to_download {
         let client = client.clone();
         let dir = opts.plugin_dir.clone();
+        let permits = Arc::clone(&permits);
 
         handles.push(tokio::spawn(async move {
+            let _permit = permits
+                .acquire_owned()
+                .await
+                .expect("semaphore is never closed");
             let result =
                 download_and_install(&client, &name, &version, sha256.as_deref(), &dir).await;
             (name, result)
@@ -228,6 +240,10 @@ fn parse_manifest_headers(content: &str) -> HashMap<String, String> {
 // ── Downloading ───────────────────────────────────────────────────────────────
 
 /// Download one plugin, verify its checksum, and move it to `plugin_dir`.
+///
+/// The archive is streamed to `<plugin_dir>/.jpm-<name>.tmp` and only renamed
+/// to `<name>.jpi` once it passed verification, so Jenkins never sees a
+/// partial or unverified file.
 async fn download_and_install(
     client: &reqwest::Client,
     name: &str,
@@ -235,19 +251,28 @@ async fn download_and_install(
     expected_sha256: Option<&str>,
     plugin_dir: &Path,
 ) -> Result<()> {
-    let bytes = download_with_retry(client, name, version).await?;
-    verify_sha256(&bytes, expected_sha256, name)?;
-    write_atomically(plugin_dir, name, &bytes).await
+    let tmp_path = plugin_dir.join(format!(".jpm-{name}.tmp"));
+    let result = async {
+        let computed = download_with_retry(client, name, version, &tmp_path).await?;
+        verify_sha256(&computed, expected_sha256, name)?;
+        move_into_place(plugin_dir, name, &tmp_path).await
+    }
+    .await;
+    if result.is_err() {
+        tokio::fs::remove_file(&tmp_path).await.ok();
+    }
+    result
 }
 
-/// Download plugin bytes from the primary URL, retrying up to `MAX_RETRIES`
+/// Download a plugin into `dest`, retrying the primary URL up to `MAX_RETRIES`
 /// times with exponential back-off. Falls back to `archives.jenkins.io` if
-/// all primary attempts fail.
+/// all primary attempts fail. Returns the Base64 SHA-256 of the file.
 async fn download_with_retry(
     client: &reqwest::Client,
     name: &str,
     version: &str,
-) -> Result<Vec<u8>> {
+    dest: &Path,
+) -> Result<String> {
     let primary_url = primary_download_url(
         std::env::var("JENKINS_UC_DOWNLOAD_URL").ok().as_deref(),
         std::env::var("JENKINS_UC_DOWNLOAD").ok().as_deref(),
@@ -258,8 +283,8 @@ async fn download_with_retry(
     let mut last_err = None;
 
     for attempt in 1..=MAX_RETRIES {
-        match fetch_bytes(client, &primary_url).await {
-            Ok(bytes) => return Ok(bytes),
+        match download_to_file(client, &primary_url, dest).await {
+            Ok(sha256) => return Ok(sha256),
             Err(e) => {
                 last_err = Some(e);
                 if attempt < MAX_RETRIES {
@@ -278,7 +303,7 @@ async fn download_with_retry(
     let fallback_url = format!("{FALLBACK_BASE}/{name}/{version}/{name}.hpi");
     eprintln!("  primary failed for {name}, trying fallback");
 
-    fetch_bytes(client, &fallback_url)
+    download_to_file(client, &fallback_url, dest)
         .await
         .with_context(|| match last_err {
             Some(e) => format!("downloading {name}:{version} failed (primary: {e})"),
@@ -311,31 +336,47 @@ fn primary_download_url(
     format!("{base}/{name}/{version}/{name}.hpi")
 }
 
-async fn fetch_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
-    Ok(client
+/// Stream the response body of `url` into `dest` (truncating it), hashing it
+/// on the way so the archive never has to be held in memory. Returns the
+/// Base64 SHA-256 of what was written.
+async fn download_to_file(client: &reqwest::Client, url: &str, dest: &Path) -> Result<String> {
+    let mut response = client
         .get(url)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?
         .error_for_status()
-        .with_context(|| format!("non-2xx from {url}"))?
-        .bytes()
-        .await?
-        .to_vec())
+        .with_context(|| format!("non-2xx from {url}"))?;
+
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .with_context(|| format!("creating '{}'", dest.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .with_context(|| format!("reading body of {url}"))?
+    {
+        hasher.update(&chunk);
+        file.write_all(&chunk)
+            .await
+            .with_context(|| format!("writing '{}'", dest.display()))?;
+    }
+    file.flush().await?;
+
+    Ok(base64::engine::general_purpose::STANDARD.encode(hasher.finalize()))
 }
 
 // ── Integrity & write ─────────────────────────────────────────────────────────
 
-/// Verify the SHA-256 of `bytes` (Base64-standard-encoded) against the value
+/// Compare the computed SHA-256 (Base64-standard-encoded) against the value
 /// stored in the lock file. The Jenkins Update Center publishes checksums as
 /// standard Base64 with `=` padding, not hex.
-fn verify_sha256(bytes: &[u8], expected: Option<&str>, name: &str) -> Result<()> {
+fn verify_sha256(computed: &str, expected: Option<&str>, name: &str) -> Result<()> {
     let Some(expected) = expected else {
         eprintln!("  warning: no sha256 for {name}, skipping integrity check");
         return Ok(());
     };
-
-    let computed = base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(bytes));
 
     if computed != expected {
         bail!("{name}: integrity check failed\n  expected: {expected}\n  computed: {computed}");
@@ -343,30 +384,24 @@ fn verify_sha256(bytes: &[u8], expected: Option<&str>, name: &str) -> Result<()>
     Ok(())
 }
 
-/// Write `bytes` to `<plugin_dir>/<name>.jpi` via a temporary file to avoid
-/// Jenkins picking up an incomplete download.
+/// Move the verified archive at `tmp_path` to `<plugin_dir>/<name>.jpi`.
 ///
 /// An existing `<name>.jpi` is kept as `<name>.bak`, which is the file the
 /// Jenkins plugin manager offers for "Downgrade to …".
 ///
 /// Uses `tokio::fs::rename` (atomic on the same filesystem). Falls back to
 /// copy + delete when source and destination are on different devices.
-async fn write_atomically(plugin_dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
-    let tmp_path = plugin_dir.join(format!(".jpm-{name}.tmp"));
+async fn move_into_place(plugin_dir: &Path, name: &str, tmp_path: &Path) -> Result<()> {
     let final_path = plugin_dir.join(format!("{name}.jpi"));
-
-    tokio::fs::write(&tmp_path, bytes)
-        .await
-        .with_context(|| format!("writing temp file for {name}"))?;
 
     backup_existing(plugin_dir, name).await?;
 
-    if tokio::fs::rename(&tmp_path, &final_path).await.is_err() {
+    if tokio::fs::rename(tmp_path, &final_path).await.is_err() {
         // Cross-device fallback: copy then delete the temp file.
-        tokio::fs::copy(&tmp_path, &final_path)
+        tokio::fs::copy(tmp_path, &final_path)
             .await
             .with_context(|| format!("moving {name}.jpi into plugin directory"))?;
-        tokio::fs::remove_file(&tmp_path).await.ok();
+        tokio::fs::remove_file(tmp_path).await.ok();
     }
 
     Ok(())
@@ -457,26 +492,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_atomically_keeps_previous_archive_as_bak() {
+    async fn move_into_place_keeps_previous_archive_as_bak() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
+        let staged = dir.join(".jpm-git.tmp");
 
-        write_atomically(dir, "git", b"v1").await.unwrap();
+        std::fs::write(&staged, b"v1").unwrap();
+        move_into_place(dir, "git", &staged).await.unwrap();
         assert!(!dir.join("git.bak").exists(), "fresh install has no backup");
+        assert!(!staged.exists());
 
-        write_atomically(dir, "git", b"v2").await.unwrap();
+        std::fs::write(&staged, b"v2").unwrap();
+        move_into_place(dir, "git", &staged).await.unwrap();
         assert_eq!(std::fs::read(dir.join("git.jpi")).unwrap(), b"v2");
         assert_eq!(std::fs::read(dir.join("git.bak")).unwrap(), b"v1");
 
-        write_atomically(dir, "git", b"v3").await.unwrap();
+        std::fs::write(&staged, b"v3").unwrap();
+        move_into_place(dir, "git", &staged).await.unwrap();
         assert_eq!(std::fs::read(dir.join("git.jpi")).unwrap(), b"v3");
         assert_eq!(std::fs::read(dir.join("git.bak")).unwrap(), b"v2");
     }
 
     #[test]
     fn verify_sha256_mismatch_errors() {
-        let bytes = b"fake plugin content";
-        let result = verify_sha256(bytes, Some("AAAA"), "test-plugin");
+        let result = verify_sha256("BBBB", Some("AAAA"), "test-plugin");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("integrity check failed"));
@@ -484,15 +523,11 @@ mod tests {
 
     #[test]
     fn verify_sha256_none_warns_but_passes() {
-        let bytes = b"no checksum";
-        assert!(verify_sha256(bytes, None, "test-plugin").is_ok());
+        assert!(verify_sha256("AAAA", None, "test-plugin").is_ok());
     }
 
     #[test]
     fn verify_sha256_correct_hash() {
-        let bytes = b"hello";
-        let hash = sha2::Sha256::digest(bytes);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(hash);
-        assert!(verify_sha256(bytes, Some(&encoded), "test-plugin").is_ok());
+        assert!(verify_sha256("AAAA", Some("AAAA"), "test-plugin").is_ok());
     }
 }
