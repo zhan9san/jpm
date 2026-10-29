@@ -72,9 +72,7 @@ fn parse_bundled_from_pom(xml: &str) -> Result<HashMap<String, String>> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
-                let tag = std::str::from_utf8(e.name().as_ref())
-                    .unwrap_or("")
-                    .to_string();
+                let tag = e.name().as_ref().to_string();
                 match tag.as_str() {
                     "artifactItem" => {
                         in_item = true;
@@ -95,7 +93,7 @@ fn parse_bundled_from_pom(xml: &str) -> Result<HashMap<String, String>> {
                 }
             }
             Ok(Event::Text(e)) if in_item || in_properties => {
-                let text = e.unescape().unwrap_or_default();
+                let text = e.xml10_content();
                 if in_item {
                     match current_tag.as_str() {
                         "artifactId" => artifact_id = text.to_string(),
@@ -108,8 +106,8 @@ fn parse_bundled_from_pom(xml: &str) -> Result<HashMap<String, String>> {
                 }
             }
             Ok(Event::End(e)) => {
-                let name_bytes = e.name();
-                let tag = std::str::from_utf8(name_bytes.as_ref()).unwrap_or("");
+                let name = e.name();
+                let tag = name.as_ref();
                 if tag == "artifactItem" && in_item {
                     if item_type == "hpi" && !artifact_id.is_empty() && !version.is_empty() {
                         let resolved_version = resolve_property_ref(&version, &properties)
