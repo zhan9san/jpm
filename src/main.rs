@@ -9,6 +9,7 @@ mod manifest;
 mod parser;
 mod resolver;
 mod roots;
+mod security;
 mod update_center;
 mod version;
 
@@ -80,6 +81,10 @@ struct LockArgs {
     /// Omit `sha256:` suffix in generated lock entries.
     #[arg(long)]
     no_sha256: bool,
+
+    /// Do not print Update Center security warnings for locked plugins.
+    #[arg(long)]
+    hide_security_warnings: bool,
 }
 
 // ── jpm install ───────────────────────────────────────────────────────────────
@@ -387,6 +392,11 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
         );
     }
 
+    // ── Security warnings (informational, never fails the lock) ──────────────
+    if !args.hide_security_warnings {
+        report_security_warnings(&resolved, &uc, &args.jenkins_version);
+    }
+
     // ── Summary + lock file write ─────────────────────────────────────────────
     let direct = resolved.values().filter(|p| p.is_direct).count();
     let transitive = resolved.len() - direct;
@@ -424,6 +434,43 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
 
     println!("wrote '{}'", args.output.display());
     Ok(())
+}
+
+/// Print the Update Center security warnings that affect locked plugins.
+fn report_security_warnings(
+    resolved: &HashMap<String, resolver::ResolvedPlugin>,
+    uc: &update_center::UpdateCenter,
+    jenkins_version: &str,
+) {
+    let warnings = security::SecurityWarnings::from_update_center(&uc.stable);
+    if warnings.unparsed_patterns > 0 {
+        eprintln!(
+            "  warning: ignored {} security warning pattern(s) that could not be parsed",
+            warnings.unparsed_patterns
+        );
+    }
+    let findings = warnings.check(resolved, uc, jenkins_version);
+    if findings.is_empty() {
+        return;
+    }
+
+    eprintln!("security warnings:");
+    for f in &findings {
+        for a in &f.advisories {
+            eprintln!("  {}:{} {}: {}", f.name, f.version, a.id, a.message);
+            if !a.url.is_empty() {
+                eprintln!("       {}", a.url);
+            }
+        }
+        match &f.fixed_in {
+            Some(v) => eprintln!("       → not affected: {}:{v}", f.name),
+            None => eprintln!("       → no unaffected version supports Jenkins {jenkins_version}"),
+        }
+    }
+    eprintln!(
+        "  {} plugin(s) with security warnings (hide with --hide-security-warnings)",
+        findings.len()
+    );
 }
 
 async fn run_install(client: &reqwest::Client, args: InstallArgs) -> Result<()> {
