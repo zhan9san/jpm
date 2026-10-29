@@ -7,9 +7,11 @@ jpm install [OPTIONS]
 
 Options:
   -l, --lock <FILE>        Lock file to install from  [default: plugins-lock.txt]
-  -d, --plugin-dir <DIR>   Target plugin directory    [default: ./plugins/]
+  -d, --plugin-dir <DIR>   Target plugin directory    [env: PLUGIN_DIR] [default: ./plugins/]
       --skip-failed        Warn on failures instead of aborting
       --dry-run            Print what would be installed without downloading
+      --concurrency <N>    Maximum parallel downloads [default: 8]
+      --credentials <C>    host[:port]:user:pass,...  [env: JENKINS_UC_CREDENTIALS]
 ```
 
 ---
@@ -228,14 +230,15 @@ src/
 
 | Behaviour | Java tool | jpm install |
 |---|---|---|
-| Concurrency | 64-thread `ForkJoinPool` | `tokio` tasks (one per plugin) |
+| Concurrency | 64-thread `ForkJoinPool` | `tokio` tasks, at most `--concurrency` (default 8) at once |
 | Skip check | re-reads MANIFEST.MF from disk | re-reads MANIFEST.MF from disk |
 | Checksum source | Fetches UC JSON at runtime | Already in lock file — no extra request |
 | Fallback URL | `archives.jenkins.io` | `archives.jenkins.io` |
 | Retries | 3 (configurable) | 3 |
 | Atomic write | `Files.move` + `REPLACE_EXISTING` | `fs::rename` + copy fallback |
 | Skip-failed flag | `--skip-failed-plugins` | `--skip-failed` |
-| Credential support | Basic auth via `--credentials` | Not in scope for v1 |
+| Credential support | Basic auth via `--credentials` | Basic auth via `--credentials` / `JENKINS_UC_CREDENTIALS`, sent only to the matching host |
+| Custom plugin URL | `name::url` in `plugins.txt` | Same syntax; `jpm lock` records `url:` and `jpm install` downloads from it |
 
 **Key advantage of `jpm install` over the Java tool:** because `sha256` is
 already stored in the lock file, no Update Center request is needed at install
@@ -246,7 +249,5 @@ install run.
 
 ## Out of Scope for v1
 
-- HTTP Basic Auth / credentials (the Java tool supports `--credentials`)
 - Incremental releases (`incrementals;groupId;version` syntax)
-- Installing from a custom URL override (the `::url` column in `plugins.txt`)
 - Progress bars / download speed reporting
