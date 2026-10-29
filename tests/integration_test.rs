@@ -713,3 +713,54 @@ async fn install_rejects_archive_that_is_not_the_locked_plugin() {
     assert!(!plugin_dir.join("mailer.jpi").exists());
     assert!(jpm_leftovers(&plugin_dir).is_empty());
 }
+
+/// One failed download leaves the plugin directory exactly as it was; with
+/// `--skip-failed` the plugins that did download are installed.
+#[tokio::test]
+async fn install_is_all_or_nothing_unless_skip_failed() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let plugin_dir = tmp.path().join("plugins");
+    fs::create_dir_all(&plugin_dir).unwrap();
+
+    let old_git = plugin_archive("git", "5.6.0");
+    fs::write(plugin_dir.join("git.jpi"), &old_git).unwrap();
+
+    let new_git = plugin_archive("git", "5.7.0");
+    let lock = format!(
+        "# Jenkins: {JENKINS_VERSION}\n\ngit:5.7.0 sha256:{}\nmailer:1.0 sha256:{}\n",
+        sha256_b64(&new_git),
+        sha256_b64(b"expected mailer")
+    );
+    fs::write(tmp.path().join("plugins-lock.txt"), lock).unwrap();
+    mount_plugin(&server, "git", "5.7.0", new_git.clone()).await;
+    mount_plugin(&server, "mailer", "1.0", plugin_archive("mailer", "1.0")).await;
+
+    let install = |extra: &[&str]| {
+        let mut cmd = Command::cargo_bin("jpm").unwrap();
+        cmd.env("JENKINS_UC_DOWNLOAD_URL", format!("{}/dl", server.uri()))
+            .args([
+                "install",
+                "-l",
+                tmp.path().join("plugins-lock.txt").to_str().unwrap(),
+                "-d",
+                plugin_dir.to_str().unwrap(),
+            ])
+            .args(extra);
+        cmd
+    };
+
+    let assert = install(&[]).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("was left unchanged"), "stderr:\n{stderr}");
+    assert_eq!(fs::read(plugin_dir.join("git.jpi")).unwrap(), old_git);
+    assert!(!plugin_dir.join("git.bak").exists());
+    assert!(!plugin_dir.join("mailer.jpi").exists());
+    assert!(jpm_leftovers(&plugin_dir).is_empty());
+
+    install(&["--skip-failed"]).assert().success();
+    assert_eq!(fs::read(plugin_dir.join("git.jpi")).unwrap(), new_git);
+    assert_eq!(fs::read(plugin_dir.join("git.bak")).unwrap(), old_git);
+    assert!(!plugin_dir.join("mailer.jpi").exists());
+    assert!(jpm_leftovers(&plugin_dir).is_empty());
+}
