@@ -92,6 +92,53 @@ fn jpm(mock: &MockServer, cache: &TempDir) -> Command {
     cmd
 }
 
+/// Build a minimal plugin archive whose manifest carries `short_name` and
+/// `version`, as served by the Update Center download mirror.
+fn plugin_archive(short_name: &str, version: &str) -> Vec<u8> {
+    use std::io::Write;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        zip.start_file(
+            "META-INF/MANIFEST.MF",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        write!(
+            zip,
+            "Manifest-Version: 1.0\r\nShort-Name: {short_name}\r\nPlugin-Version: {version}\r\n"
+        )
+        .unwrap();
+        zip.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+/// Base64 SHA-256, the checksum format used by the Update Center and lock files.
+fn sha256_b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    base64::engine::general_purpose::STANDARD.encode(sha2::Sha256::digest(bytes))
+}
+
+/// Serve `bytes` at `/dl/<name>/<version>/<name>.hpi`.
+async fn mount_plugin(server: &MockServer, name: &str, version: &str, bytes: Vec<u8>) {
+    Mock::given(method("GET"))
+        .and(path(format!("/dl/{name}/{version}/{name}.hpi")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+        .mount(server)
+        .await;
+}
+
+/// Leftover `.jpm-*` temp files or directories in the plugin directory.
+fn jpm_leftovers(dir: &std::path::Path) -> Vec<String> {
+    fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with(".jpm-"))
+        .collect()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// `jpm lock` resolves direct plugins and their transitive deps, writes a
@@ -539,4 +586,80 @@ async fn lock_skips_experimental_uc_unless_requested() {
         .success();
     let reqs = mock.received_requests().await.unwrap();
     assert_eq!(experimental_hits(&reqs), 1, "experimental UC not fetched");
+}
+
+/// `jpm install` downloads from `JENKINS_UC_DOWNLOAD_URL`, verifies the lock
+/// checksums and writes `<name>.jpi`, also when downloads are serialised.
+#[tokio::test]
+async fn install_downloads_and_verifies_plugins() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let plugin_dir = tmp.path().join("plugins");
+
+    let git = plugin_archive("git", "5.7.0");
+    let mailer = plugin_archive("mailer", "488.v0c9639c1a_eb_3");
+    let lock = format!(
+        "# Jenkins: {JENKINS_VERSION}\n\ngit:5.7.0 sha256:{}\nmailer:488.v0c9639c1a_eb_3 sha256:{}\n",
+        sha256_b64(&git),
+        sha256_b64(&mailer)
+    );
+    fs::write(tmp.path().join("plugins-lock.txt"), lock).unwrap();
+    mount_plugin(&server, "git", "5.7.0", git.clone()).await;
+    mount_plugin(&server, "mailer", "488.v0c9639c1a_eb_3", mailer.clone()).await;
+
+    Command::cargo_bin("jpm")
+        .unwrap()
+        .env("JENKINS_UC_DOWNLOAD_URL", format!("{}/dl", server.uri()))
+        .args([
+            "install",
+            "--concurrency",
+            "1",
+            "-l",
+            tmp.path().join("plugins-lock.txt").to_str().unwrap(),
+            "-d",
+            plugin_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read(plugin_dir.join("git.jpi")).unwrap(), git);
+    assert_eq!(fs::read(plugin_dir.join("mailer.jpi")).unwrap(), mailer);
+    assert!(jpm_leftovers(&plugin_dir).is_empty());
+}
+
+/// A checksum mismatch fails the install and leaves no plugin or temp file.
+#[tokio::test]
+async fn install_rejects_checksum_mismatch() {
+    let server = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let plugin_dir = tmp.path().join("plugins");
+
+    let git = plugin_archive("git", "5.7.0");
+    let lock = format!(
+        "# Jenkins: {JENKINS_VERSION}\n\ngit:5.7.0 sha256:{}\n",
+        sha256_b64(b"something else")
+    );
+    fs::write(tmp.path().join("plugins-lock.txt"), lock).unwrap();
+    mount_plugin(&server, "git", "5.7.0", git).await;
+
+    let assert = Command::cargo_bin("jpm")
+        .unwrap()
+        .env("JENKINS_UC_DOWNLOAD_URL", format!("{}/dl", server.uri()))
+        .args([
+            "install",
+            "-l",
+            tmp.path().join("plugins-lock.txt").to_str().unwrap(),
+            "-d",
+            plugin_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("integrity check failed"),
+        "stderr:\n{stderr}"
+    );
+
+    assert!(!plugin_dir.join("git.jpi").exists());
+    assert!(jpm_leftovers(&plugin_dir).is_empty());
 }

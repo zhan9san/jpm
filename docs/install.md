@@ -95,7 +95,8 @@ Print a summary before downloading:
 
 ### 4. Download concurrently
 
-Spawn one `tokio` task per plugin that needs downloading. Each task:
+Spawn one `tokio` task per plugin that needs downloading. A semaphore caps
+how many downloads run at once (`--concurrency`, default 8). Each task:
 
 1. Build the primary download URL:
 
@@ -107,8 +108,9 @@ Spawn one `tokio` task per plugin that needs downloading. Each task:
    `JENKINS_UC_DOWNLOAD` environment variables as overrides (mirrors the Java
    tool's behaviour, see [Download URL Construction](#download-url-construction)).
 
-2. Download to a temporary file inside a `tempdir` (not directly to the
-   plugin dir — avoids partial files being picked up by Jenkins).
+2. Stream the response to `<plugin-dir>/.jpm-<name>.tmp`, computing the
+   SHA-256 while writing, so archives are never held in memory and Jenkins
+   never sees a partial `.jpi`.
 
 3. On network error or non-2xx status: retry up to **3 times** with a brief
    back-off, then fall back to the archives mirror:

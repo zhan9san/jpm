@@ -49,7 +49,7 @@ xattr -d com.apple.quarantine jpm
 
 ```bash
 jpm lock    -j <VERSION> [-f plugins.txt] [-o plugins-lock.txt] [--fix] [--upgrade]
-jpm install [-l plugins-lock.txt] [-d ./plugins/] [--dry-run] [--skip-failed]
+jpm install [-l plugins-lock.txt] [-d ./plugins/] [--dry-run] [--skip-failed] [--concurrency N]
 jpm doctor  [-l plugins-lock.txt] [-d ./plugins/] [--strict]
 jpm graph   -j <VERSION> (-f plugins.txt | -l plugins-lock.txt) [-o plugins-graph.dot] [--allow-cycle]
 jpm roots   -j <VERSION> [-f plugins.txt] [--write] [--keep <PLUGIN>]
