@@ -12,6 +12,7 @@ mod resolver;
 mod roots;
 mod security;
 mod update_center;
+mod url_plugins;
 mod version;
 mod war;
 
@@ -322,7 +323,7 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
         }
     };
 
-    let (uc, bundled, detached) = tokio::try_join!(
+    let (mut uc, bundled, detached) = tokio::try_join!(
         update_center::UpdateCenter::fetch(
             client,
             &jenkins_version,
@@ -342,6 +343,11 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
         println!("  {} plugin(s) bundled in Jenkins WAR", bundled.len());
     }
 
+    // Plugins with a URL in plugins.txt: read their archives and register
+    // them like Update Center plugins.
+    let url_plugins = url_plugins::load(client, &requests).await?;
+    url_plugins::apply(&mut uc, &mut requests, &url_plugins);
+
     println!("resolving dependencies...");
     let mut resolved = resolver::resolve(&requests, &uc);
 
@@ -354,9 +360,15 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
                 "error: {}:{} requires Jenkins >= {} (target: {})",
                 issue.name, issue.version, issue.required_core, jenkins_version
             );
-            match &issue.suggestion {
-                Some(v) => eprintln!("       → highest compatible version: {}:{}", issue.name, v),
-                None => eprintln!("       → no compatible version found in Update Center"),
+            match (url_plugins.get(&issue.name), &issue.suggestion) {
+                (Some(p), _) => eprintln!(
+                    "       → {} comes from {}; use a build that supports Jenkins {jenkins_version}",
+                    issue.name, p.url
+                ),
+                (None, Some(v)) => {
+                    eprintln!("       → highest compatible version: {}:{}", issue.name, v)
+                }
+                (None, None) => eprintln!("       → no compatible version found in Update Center"),
             }
         }
         eprintln!(
@@ -377,6 +389,15 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
 
         // --fix: fix only plugins that fail the compat check.
         for issue in &compat_issues {
+            if let Some(p) = url_plugins.get(&issue.name) {
+                anyhow::bail!(
+                    "{}:{} requires Jenkins >= {} — cannot auto-fix a plugin from {}",
+                    issue.name,
+                    issue.version,
+                    issue.required_core,
+                    p.url
+                );
+            }
             match &issue.suggestion {
                 Some(v) => {
                     updates.insert(issue.name.clone(), v.clone());
@@ -396,7 +417,7 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
         // --upgrade: also update compatible plugins to the highest available version.
         if args.upgrade {
             for plugin in resolved.values() {
-                if updates.contains_key(&plugin.name) {
+                if updates.contains_key(&plugin.name) || url_plugins.contains_key(&plugin.name) {
                     continue;
                 }
                 if let Some(best) = uc.highest_compatible_version(&plugin.name, &target) {
@@ -429,6 +450,7 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
 
             requests =
                 parser::parse_plugins_txt(&new_manifest).context("re-parsing plugins.txt")?;
+            url_plugins::apply(&mut uc, &mut requests, &url_plugins);
         }
 
         if args.upgrade {
@@ -440,6 +462,9 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
                     resolver::resolve_with_min_versions(&requests, &uc, &upgrade_floors);
                 let mut changed = false;
                 for plugin in candidate.values() {
+                    if url_plugins.contains_key(&plugin.name) {
+                        continue;
+                    }
                     if let Some(best) = uc.highest_compatible_version(&plugin.name, &target) {
                         if JenkinsVersion::new(&best) > JenkinsVersion::new(&plugin.version) {
                             let should_update = match upgrade_floors.get(&plugin.name) {
@@ -465,6 +490,9 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
             resolved = resolver::resolve(&requests, &uc);
         }
     }
+
+    // A URL plugin must not have been replaced by an Update Center version.
+    url_plugins::check_kept(&resolved, &url_plugins)?;
 
     // ── Dependency cycle check ────────────────────────────────────────────────
     if let Some(cycle) = resolver::detect_cycle(&resolved, &uc, &bundled, &detached) {

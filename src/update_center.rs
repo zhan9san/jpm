@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use crate::fetch;
+use crate::url_plugins::UrlPlugin;
 use crate::version::JenkinsVersion;
 
 const CACHE_TTL: Duration = Duration::from_secs(3600);
@@ -18,6 +20,9 @@ pub struct UpdateCenter {
     pub stable: Value,
     pub experimental: Value,
     pub plugin_versions: Value,
+    /// `(version, source URL)` of each plugin registered with
+    /// [`add_url_plugin`](Self::add_url_plugin), by name.
+    pub url_plugins: HashMap<String, (String, String)>,
 }
 
 impl UpdateCenter {
@@ -71,6 +76,7 @@ impl UpdateCenter {
             stable,
             experimental,
             plugin_versions,
+            url_plugins: HashMap::new(),
         })
     }
 
@@ -109,6 +115,38 @@ impl UpdateCenter {
         parse_deps(deps)
     }
 
+    /// Look up the source URL of a plugin registered with
+    /// [`add_url_plugin`](Self::add_url_plugin). Update Center plugins have
+    /// none, even though `plugin-versions.json` lists a `url` for each version.
+    pub fn url_for(&self, plugin: &str, version: &str) -> Option<&str> {
+        match self.url_plugins.get(plugin) {
+            Some((v, url)) if v == version => Some(url),
+            _ => None,
+        }
+    }
+
+    /// Register a plugin read from a URL as if `plugin-versions.json` listed
+    /// it, so resolution, compatibility and cycle checks see its manifest.
+    pub fn add_url_plugin(&mut self, p: &UrlPlugin) {
+        let dependencies: Vec<Value> = p
+            .dependencies
+            .iter()
+            .map(|(name, version, optional)| {
+                serde_json::json!({ "name": name, "version": version, "optional": optional })
+            })
+            .collect();
+        let mut entry = serde_json::json!({
+            "sha256": p.sha256,
+            "dependencies": dependencies,
+        });
+        if let Some(core) = &p.required_core {
+            entry["requiredCore"] = Value::from(core.as_str());
+        }
+        self.plugin_versions["plugins"][&p.name][&p.version] = entry;
+        self.url_plugins
+            .insert(p.name.clone(), (p.version.clone(), p.url.clone()));
+    }
+
     /// Return the `requiredCore` for a specific plugin version.
     pub fn required_core_for(&self, name: &str, version: &str) -> Option<&str> {
         self.plugin_versions["plugins"][name][version]["requiredCore"].as_str()
@@ -143,7 +181,29 @@ mod tests {
             stable: json!({}),
             experimental: json!({}),
             plugin_versions,
+            url_plugins: Default::default(),
         }
+    }
+
+    #[test]
+    fn add_url_plugin_is_visible_through_lookups() {
+        let mut uc = make_uc(json!({ "plugins": {} }));
+        uc.add_url_plugin(&UrlPlugin {
+            name: "my-plugin".into(),
+            version: "1.0".into(),
+            url: "file:///p.hpi".into(),
+            sha256: "SHA=".into(),
+            required_core: Some("2.440.3".into()),
+            dependencies: vec![("credentials".into(), "1371.0".into(), false)],
+        });
+        assert_eq!(uc.url_for("my-plugin", "1.0"), Some("file:///p.hpi"));
+        assert_eq!(uc.url_for("my-plugin", "2.0"), None);
+        assert_eq!(uc.sha256_for("my-plugin", "1.0"), Some("SHA="));
+        assert_eq!(uc.required_core_for("my-plugin", "1.0"), Some("2.440.3"));
+        assert_eq!(
+            uc.dependencies_for("my-plugin", "1.0"),
+            vec![("credentials".to_string(), "1371.0".to_string(), false)]
+        );
     }
 
     #[test]

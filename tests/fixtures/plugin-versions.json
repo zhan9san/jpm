@@ -32,6 +32,7 @@
       "1371.0": {
         "requiredCore": "2.361.4",
         "sha256": "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE=",
+        "url": "https://updates.jenkins.io/download/plugins/credentials/1371.0/credentials.hpi",
         "dependencies": []
       }
     },

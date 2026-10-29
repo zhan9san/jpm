@@ -9,8 +9,9 @@ use sha2::Digest as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
 
-use crate::lockfile;
+use crate::lockfile::{self, LockEntry};
 use crate::manifest;
+use crate::url_plugins;
 use crate::version::JenkinsVersion;
 
 const PRIMARY_BASE: &str = "https://updates.jenkins.io/download/plugins";
@@ -49,16 +50,16 @@ pub async fn install(client: &reqwest::Client, opts: &InstallOptions) -> Result<
         .with_context(|| format!("scanning '{}'", opts.plugin_dir.display()))?;
 
     // 4. Partition: up-to-date vs needs download.
-    let mut to_download: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut to_download: Vec<(String, LockEntry)> = Vec::new();
     let mut up_to_date = 0usize;
 
-    for (name, (version, sha256)) in &entries {
+    for (name, entry) in &entries {
         let needs_update = match installed.get(name) {
-            Some(inst) => JenkinsVersion::new(inst) < JenkinsVersion::new(version),
+            Some(inst) => JenkinsVersion::new(inst) < JenkinsVersion::new(&entry.version),
             None => true,
         };
         if needs_update {
-            to_download.push((name.clone(), version.clone(), sha256.clone()));
+            to_download.push((name.clone(), entry.clone()));
         } else {
             up_to_date += 1;
         }
@@ -71,8 +72,8 @@ pub async fn install(client: &reqwest::Client, opts: &InstallOptions) -> Result<
     println!("  {} plugin(s) to download", to_download.len());
 
     if opts.dry_run {
-        for (name, version, _) in &to_download {
-            println!("  would install {name}:{version}");
+        for (name, entry) in &to_download {
+            println!("  would install {name}:{}", entry.version);
         }
         return Ok(());
     }
@@ -101,7 +102,7 @@ pub async fn install(client: &reqwest::Client, opts: &InstallOptions) -> Result<
     let permits = Arc::new(Semaphore::new(opts.concurrency.max(1)));
     let mut handles = Vec::with_capacity(to_download.len());
 
-    for (name, version, sha256) in to_download {
+    for (name, entry) in to_download {
         let client = client.clone();
         let dir = staging.path().to_path_buf();
         let permits = Arc::clone(&permits);
@@ -111,8 +112,7 @@ pub async fn install(client: &reqwest::Client, opts: &InstallOptions) -> Result<
                 .acquire_owned()
                 .await
                 .expect("semaphore is never closed");
-            let result =
-                download_and_stage(&client, &name, &version, sha256.as_deref(), &dir).await;
+            let result = download_and_stage(&client, &name, &entry, &dir).await;
             (name, result)
         }));
     }
@@ -207,15 +207,17 @@ pub fn scan_installed(dir: &Path) -> Result<HashMap<String, String>> {
 async fn download_and_stage(
     client: &reqwest::Client,
     name: &str,
-    version: &str,
-    expected_sha256: Option<&str>,
+    entry: &LockEntry,
     staging_dir: &Path,
 ) -> Result<PathBuf> {
     let path = staging_dir.join(format!("{name}.jpi"));
     let result = async {
-        let computed = download_with_retry(client, name, version, &path).await?;
-        verify_sha256(&computed, expected_sha256, name)?;
-        verify_archive(&path, name, version).await
+        let computed = match &entry.url {
+            Some(url) => fetch_from_url(client, name, url, &path).await?,
+            None => download_with_retry(client, name, &entry.version, &path).await?,
+        };
+        verify_sha256(&computed, entry.sha256.as_deref(), name)?;
+        verify_archive(&path, name, &entry.version).await
     }
     .await;
     match result {
@@ -274,6 +276,36 @@ async fn download_with_retry(
             Some(e) => format!("downloading {name}:{version} failed (primary: {e})"),
             None => format!("downloading {name}:{version} failed"),
         })
+}
+
+/// Fetch a plugin whose lock entry has its own `url:` (a `file://` path is
+/// copied, `http(s)://` downloaded with retries). There is no archive
+/// fallback: the plugin is not in the Update Center.
+async fn fetch_from_url(
+    client: &reqwest::Client,
+    name: &str,
+    url: &str,
+    dest: &Path,
+) -> Result<String> {
+    if let Some(path) = url_plugins::local_path(url)? {
+        return url_plugins::copy_local(&path, dest).await;
+    }
+    let mut attempt = 1;
+    loop {
+        match download_to_file(client, url, dest).await {
+            Ok(sha256) => return Ok(sha256),
+            Err(e) if attempt < MAX_RETRIES => {
+                let wait = Duration::from_millis(300 * (1 << (attempt - 1)));
+                eprintln!(
+                    "  retry {attempt}/{MAX_RETRIES} for {name} (waiting {}ms): {e:#}",
+                    wait.as_millis()
+                );
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e).with_context(|| format!("downloading {name} from {url}")),
+        }
+    }
 }
 
 /// Build the primary download URL, honouring the mirror overrides of the Java

@@ -1141,3 +1141,179 @@ async fn lock_reads_jenkins_version_and_bundled_plugins_from_war() {
         "stderr:\n{stderr}"
     );
 }
+
+/// Plugin archive with extra manifest headers (e.g. dependencies).
+fn plugin_archive_with(short_name: &str, version: &str, extra: &str) -> Vec<u8> {
+    use std::io::Write;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        zip.start_file(
+            "META-INF/MANIFEST.MF",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        write!(
+            zip,
+            "Manifest-Version: 1.0\r\nShort-Name: {short_name}\r\nPlugin-Version: {version}\r\n{extra}"
+        )
+        .unwrap();
+        zip.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+fn file_url(path: &std::path::Path) -> String {
+    reqwest::Url::from_file_path(path).unwrap().to_string()
+}
+
+/// `name::file://…` and `name:version:http://…` plugins are locked from their
+/// manifests (version, dependencies, local sha256) with a `url:` field, and
+/// `jpm install` fetches them from that URL.
+#[tokio::test]
+async fn lock_and_install_url_plugins() {
+    let mock = start_mock_uc().await;
+    let tmp = TempDir::new().unwrap();
+
+    let local = plugin_archive_with(
+        "my-local",
+        "1.0",
+        "Jenkins-Version: 2.400\r\nPlugin-Dependencies: credentials:1371.0,mailer:1.0;resolution:=optional\r\n",
+    );
+    let local_path = tmp.path().join("my-local.hpi");
+    fs::write(&local_path, &local).unwrap();
+    let remote = plugin_archive("my-remote", "2.0");
+    Mock::given(method("GET"))
+        .and(path("/custom/my-remote.hpi"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(remote.clone()))
+        .mount(&mock)
+        .await;
+    let local_url = file_url(&local_path);
+    let remote_url = format!("{}/custom/my-remote.hpi", mock.uri());
+
+    let manifest = tmp.path().join("plugins.txt");
+    let lock_file = tmp.path().join("plugins-lock.txt");
+    fs::write(
+        &manifest,
+        format!("my-local::{local_url}\nmy-remote:2.0:{remote_url}\n"),
+    )
+    .unwrap();
+    jpm(&mock, &tmp)
+        .args([
+            "lock",
+            "-j",
+            JENKINS_VERSION,
+            "--skip-bundled",
+            "-f",
+            manifest.to_str().unwrap(),
+            "-o",
+            lock_file.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let lock = fs::read_to_string(&lock_file).unwrap();
+    let local_line = format!("my-local:1.0 sha256:{} url:{local_url}", sha256_b64(&local));
+    let remote_line = format!(
+        "my-remote:2.0 sha256:{} url:{remote_url}",
+        sha256_b64(&remote)
+    );
+    assert!(lock.contains(&local_line), "lock:\n{lock}");
+    assert!(lock.contains(&remote_line), "lock:\n{lock}");
+    // The UC lists a `url` for every version; only URL plugins record one.
+    assert!(
+        lock.lines()
+            .any(|l| l == "credentials:1371.0 sha256:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE="),
+        "dependency from manifest, without url:\n{lock}"
+    );
+    assert!(
+        !lock.contains("mailer:"),
+        "optional dependency skipped:\n{lock}"
+    );
+
+    // `graph -l` re-reads URL plugin manifests for their dependency edges.
+    let dot = tmp.path().join("graph.dot");
+    jpm(&mock, &tmp)
+        .args([
+            "graph",
+            "-j",
+            JENKINS_VERSION,
+            "--skip-bundled",
+            "-l",
+            lock_file.to_str().unwrap(),
+            "-o",
+            dot.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let dot = fs::read_to_string(dot).unwrap();
+    assert!(
+        dot.contains("\"my-local\" -> \"credentials\""),
+        "graph:\n{dot}"
+    );
+
+    // Install only the URL plugins (credentials would need the mock mirror).
+    let url_lock = tmp.path().join("url-lock.txt");
+    fs::write(
+        &url_lock,
+        format!("# Jenkins: {JENKINS_VERSION}\n\n{local_line}\n{remote_line}\n"),
+    )
+    .unwrap();
+    let plugin_dir = tmp.path().join("plugins");
+    Command::cargo_bin("jpm")
+        .unwrap()
+        .args([
+            "install",
+            "-l",
+            url_lock.to_str().unwrap(),
+            "-d",
+            plugin_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    assert_eq!(fs::read(plugin_dir.join("my-local.jpi")).unwrap(), local);
+    assert_eq!(fs::read(plugin_dir.join("my-remote.jpi")).unwrap(), remote);
+}
+
+/// A URL plugin must match its pinned version, and resolution must not
+/// replace it with a newer Update Center version.
+#[tokio::test]
+async fn lock_rejects_mismatched_or_outgrown_url_plugins() {
+    let mock = start_mock_uc().await;
+    let tmp = TempDir::new().unwrap();
+    let manifest = tmp.path().join("plugins.txt");
+    let lock_file = tmp.path().join("plugins-lock.txt");
+    let lock_args = [
+        "lock",
+        "-j",
+        JENKINS_VERSION,
+        "--skip-bundled",
+        "-f",
+        manifest.to_str().unwrap(),
+        "-o",
+        lock_file.to_str().unwrap(),
+    ];
+
+    let archive = tmp.path().join("credentials.hpi");
+    fs::write(&archive, plugin_archive("credentials", "1000.0")).unwrap();
+    let url = file_url(&archive);
+
+    fs::write(&manifest, format!("credentials:1001.0:{url}\n")).unwrap();
+    let assert = jpm(&mock, &tmp).args(lock_args).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("pins credentials:1001.0, but") && stderr.contains("is version 1000.0"),
+        "stderr:\n{stderr}"
+    );
+
+    // git (latest in the stable UC) needs credentials >= 1371.0, newer than
+    // the URL build.
+    fs::write(&manifest, format!("git\ncredentials::{url}\n")).unwrap();
+    let assert = jpm(&mock, &tmp).args(lock_args).assert().failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("credentials is pinned to 1000.0 from")
+            && stderr.contains("requires credentials >= 1371.0"),
+        "stderr:\n{stderr}"
+    );
+}

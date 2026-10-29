@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use crate::parser;
 use crate::resolver;
 use crate::update_center::UpdateCenter;
+use crate::url_plugins;
 use crate::war;
 
 #[derive(Debug)]
@@ -28,17 +29,20 @@ pub async fn run(client: &reqwest::Client, opts: RootsOptions) -> Result<()> {
 
     let manifest_text = std::fs::read_to_string(&opts.plugin_file)
         .with_context(|| format!("reading manifest '{}'", opts.plugin_file.display()))?;
-    let requests = parser::parse_plugins_txt(&manifest_text).context("parsing plugins.txt")?;
+    let mut requests = parser::parse_plugins_txt(&manifest_text).context("parsing plugins.txt")?;
     println!("  {} plugin(s) in manifest", requests.len());
 
-    let uc = UpdateCenter::fetch(
+    let mut uc = UpdateCenter::fetch(
         client,
         &jenkins_version,
         parser::uses_experimental(&requests),
     )
     .await
     .context("fetching update center data")?;
+    let url_plugins = url_plugins::load(client, &requests).await?;
+    url_plugins::apply(&mut uc, &mut requests, &url_plugins);
     let resolved = resolver::resolve(&requests, &uc);
+    url_plugins::check_kept(&resolved, &url_plugins)?;
 
     let compat_issues = resolver::check_compat(&resolved, &uc, &jenkins_version);
     if !compat_issues.is_empty() {

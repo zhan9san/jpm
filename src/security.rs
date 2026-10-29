@@ -211,6 +211,7 @@ mod tests {
             stable: json!({}),
             experimental: json!({}),
             plugin_versions,
+            url_plugins: Default::default(),
         }
     }
 
@@ -222,6 +223,7 @@ mod tests {
                 version: version.to_string(),
                 sha256: None,
                 is_direct: true,
+                url: None,
             },
         )])
     }
