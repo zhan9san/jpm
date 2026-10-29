@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +10,7 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
 
 use crate::lockfile;
+use crate::manifest;
 use crate::version::JenkinsVersion;
 
 const PRIMARY_BASE: &str = "https://updates.jenkins.io/download/plugins";
@@ -159,7 +159,7 @@ pub fn scan_installed(dir: &Path) -> Result<HashMap<String, String>> {
         if ext != "hpi" && ext != "jpi" {
             continue;
         }
-        match read_plugin_manifest(&path) {
+        match manifest::read_plugin_manifest(&path) {
             Ok((name, version)) => {
                 map.insert(name, version);
             }
@@ -170,71 +170,6 @@ pub fn scan_installed(dir: &Path) -> Result<HashMap<String, String>> {
     }
 
     Ok(map)
-}
-
-/// Open an `.hpi`/`.jpi` ZIP archive and return `(short-name, plugin-version)`
-/// extracted from `META-INF/MANIFEST.MF`.
-fn read_plugin_manifest(path: &Path) -> Result<(String, String)> {
-    let file =
-        std::fs::File::open(path).with_context(|| format!("opening '{}'", path.display()))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .with_context(|| format!("'{}' is not a valid ZIP/HPI", path.display()))?;
-
-    let mut entry = archive
-        .by_name("META-INF/MANIFEST.MF")
-        .with_context(|| format!("no META-INF/MANIFEST.MF in '{}'", path.display()))?;
-
-    let mut content = String::new();
-    entry.read_to_string(&mut content)?;
-
-    let headers = parse_manifest_headers(&content);
-
-    // `Short-Name` is the artifact ID; fall back to the filename stem.
-    let name = headers
-        .get("Short-Name")
-        .cloned()
-        .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
-        .with_context(|| format!("cannot determine name from '{}'", path.display()))?;
-
-    let version = headers
-        .get("Plugin-Version")
-        .cloned()
-        .with_context(|| format!("no Plugin-Version in '{}'", path.display()))?;
-
-    Ok((name, version))
-}
-
-/// Parse a Java JAR manifest into a `key → value` map.
-///
-/// Lines that start with a single space are continuations of the previous
-/// header value (JAR manifest specification §3.5).
-fn parse_manifest_headers(content: &str) -> HashMap<String, String> {
-    let mut map: HashMap<String, String> = HashMap::new();
-    let mut current_key: Option<String> = None;
-    let mut current_val = String::new();
-
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix(' ') {
-            // Continuation: append (strip the leading space).
-            current_val.push_str(rest);
-        } else {
-            // Flush previous header.
-            if let Some(key) = current_key.take() {
-                map.insert(key, current_val.trim_end().to_string());
-                current_val.clear();
-            }
-            if let Some((k, v)) = line.split_once(':') {
-                current_key = Some(k.to_string());
-                current_val = v.trim_start().to_string();
-            }
-        }
-    }
-    // Flush the final header.
-    if let Some(key) = current_key {
-        map.insert(key, current_val.trim_end().to_string());
-    }
-
-    map
 }
 
 // ── Downloading ───────────────────────────────────────────────────────────────
@@ -255,6 +190,7 @@ async fn download_and_install(
     let result = async {
         let computed = download_with_retry(client, name, version, &tmp_path).await?;
         verify_sha256(&computed, expected_sha256, name)?;
+        verify_archive(&tmp_path, name, version).await?;
         move_into_place(plugin_dir, name, &tmp_path).await
     }
     .await;
@@ -384,6 +320,36 @@ fn verify_sha256(computed: &str, expected: Option<&str>, name: &str) -> Result<(
     Ok(())
 }
 
+/// Check that the file at `path` is a plugin archive for `name:version`.
+///
+/// The sha256 check above is skipped when the lock has no checksum, so this
+/// is what catches a mirror answering with an HTML error page or the wrong
+/// file: the archive must be a valid ZIP whose `META-INF/MANIFEST.MF` has a
+/// matching `Short-Name` (when present) and `Plugin-Version`.
+async fn verify_archive(path: &Path, name: &str, version: &str) -> Result<()> {
+    let path = path.to_path_buf();
+    let headers = tokio::task::spawn_blocking(move || manifest::read_headers_from_path(&path))
+        .await
+        .context("archive check task panicked")?
+        .with_context(|| format!("{name}: downloaded file is not a plugin archive"))?;
+    check_manifest(&headers, name, version)
+}
+
+fn check_manifest(headers: &HashMap<String, String>, name: &str, version: &str) -> Result<()> {
+    if let Some(short_name) = headers.get("Short-Name") {
+        if short_name != name {
+            bail!("{name}: downloaded archive is plugin '{short_name}', not '{name}'");
+        }
+    }
+    let Some(plugin_version) = headers.get("Plugin-Version") else {
+        bail!("{name}: downloaded archive has no Plugin-Version in its manifest");
+    };
+    if JenkinsVersion::new(plugin_version) != JenkinsVersion::new(version) {
+        bail!("{name}: downloaded archive is version {plugin_version}, lock file says {version}");
+    }
+    Ok(())
+}
+
 /// Move the verified archive at `tmp_path` to `<plugin_dir>/<name>.jpi`.
 ///
 /// An existing `<name>.jpi` is kept as `<name>.bak`, which is the file the
@@ -430,25 +396,6 @@ async fn backup_existing(plugin_dir: &Path, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_simple_manifest() {
-        let manifest = "Manifest-Version: 1.0\r\nShort-Name: git\r\nPlugin-Version: 5.7.0\r\n";
-        let headers = parse_manifest_headers(manifest);
-        assert_eq!(headers["Short-Name"], "git");
-        assert_eq!(headers["Plugin-Version"], "5.7.0");
-    }
-
-    #[test]
-    fn parses_continuation_lines() {
-        let manifest = "Long-Name: Git plugin with a very lon\r\n g name continued here\r\nPlugin-Version: 5.7.0\r\n";
-        let headers = parse_manifest_headers(manifest);
-        assert_eq!(
-            headers["Long-Name"],
-            "Git plugin with a very long name continued here"
-        );
-        assert_eq!(headers["Plugin-Version"], "5.7.0");
-    }
 
     #[test]
     fn download_url_defaults_to_update_center() {
@@ -511,6 +458,36 @@ mod tests {
         move_into_place(dir, "git", &staged).await.unwrap();
         assert_eq!(std::fs::read(dir.join("git.jpi")).unwrap(), b"v3");
         assert_eq!(std::fs::read(dir.join("git.bak")).unwrap(), b"v2");
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn check_manifest_accepts_matching_archive() {
+        let h = headers(&[("Short-Name", "git"), ("Plugin-Version", "5.7.0")]);
+        assert!(check_manifest(&h, "git", "5.7.0").is_ok());
+        // Versions compare like Jenkins core, and Short-Name is optional.
+        let h = headers(&[("Plugin-Version", "1.0.9.0")]);
+        assert!(check_manifest(&h, "mapdb-api", "1.0.9").is_ok());
+    }
+
+    #[test]
+    fn check_manifest_rejects_wrong_plugin_or_version() {
+        let h = headers(&[("Short-Name", "mailer"), ("Plugin-Version", "5.7.0")]);
+        let err = check_manifest(&h, "git", "5.7.0").unwrap_err().to_string();
+        assert!(err.contains("is plugin 'mailer'"), "{err}");
+
+        let h = headers(&[("Short-Name", "git"), ("Plugin-Version", "5.6.0")]);
+        let err = check_manifest(&h, "git", "5.7.0").unwrap_err().to_string();
+        assert!(err.contains("is version 5.6.0"), "{err}");
+
+        let h = headers(&[("Short-Name", "git")]);
+        assert!(check_manifest(&h, "git", "5.7.0").is_err());
     }
 
     #[test]
