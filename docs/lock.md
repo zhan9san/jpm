@@ -23,6 +23,7 @@ Options:
       --fix                        Rewrite only incompatible pinned versions
       --upgrade                    Rewrite all pinned versions to highest compatible
       --no-sha256                  Omit sha256 suffix in lock entries
+      --hide-security-warnings     Do not print Update Center security warnings
 ```
 
 ## Input format (`plugins.txt`)
@@ -120,6 +121,22 @@ When writing a lock, JPM compares the existing lock's `manifest-hash` with the
 current `plugins.txt` hash.
 
 If they differ, JPM warns that the lock is out of date.
+
+## Security warnings
+
+The Update Center lists plugin security advisories in `warnings[]`, each with
+regular expressions for the affected versions. After resolving, JPM prints
+every locked plugin version that an advisory matches, together with the newest
+unaffected version that still supports the target Jenkins (if any):
+
+```text
+security warnings:
+  sonar:2.17.2 SECURITY-3989: Stored XSS vulnerability
+       https://www.jenkins.io/security/advisory/2026-09-02/#SECURITY-3989
+       → not affected: sonar:2.19.0
+```
+
+Warnings never fail the lock. Use `--hide-security-warnings` to silence them.
 
 ## Dependency cycle design
 
