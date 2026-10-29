@@ -25,6 +25,8 @@ pub struct ResolvedPlugin {
     pub sha256: Option<String>,
     /// True if this plugin was requested directly in `plugins.txt`.
     pub is_direct: bool,
+    /// Download URL for plugins sourced from a URL in `plugins.txt`.
+    pub url: Option<String>,
 }
 
 /// Source channel used when the plugin was enqueued, so we know which UC
@@ -149,6 +151,10 @@ pub fn resolve_with_min_versions(
             .sha256_for(&entry.name, &effective_version)
             .map(str::to_owned);
 
+        let url = uc
+            .url_for(&entry.name, &effective_version)
+            .map(str::to_owned);
+
         resolved.insert(
             entry.name.clone(),
             ResolvedPlugin {
@@ -156,6 +162,7 @@ pub fn resolve_with_min_versions(
                 version: effective_version.clone(),
                 sha256,
                 is_direct: entry.is_direct,
+                url,
             },
         );
 
@@ -404,6 +411,7 @@ mod tests {
             version: version.to_string(),
             sha256: None,
             is_direct: true,
+            url: None,
         }
     }
 

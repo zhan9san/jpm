@@ -29,9 +29,9 @@ pub struct PluginRequest {
     pub name: String,
     /// Version specifier from the manifest.
     pub version: VersionSpec,
-    /// Optional download URL override (reserved for future use — dependency
-    /// resolution is skipped for URL-sourced plugins).
-    #[allow(dead_code)]
+    /// Download URL (`http(s)://` or `file://`) for plugins that do not come
+    /// from the Update Center; the archive's manifest supplies the version
+    /// and dependencies.
     pub url: Option<String>,
 }
 
@@ -46,6 +46,9 @@ pub struct PluginRequest {
 /// - omitted / `latest`  → `VersionSpec::Latest`
 /// - `experimental`      → `VersionSpec::Experimental`
 /// - anything else       → `VersionSpec::Pinned`
+///
+/// `artifactId:https://...` (a URL where the version goes) is read as
+/// `artifactId::https://...`.
 pub fn parse_plugins_txt(content: &str) -> Result<Vec<PluginRequest>> {
     let mut plugins = Vec::new();
 
@@ -55,7 +58,15 @@ pub fn parse_plugins_txt(content: &str) -> Result<Vec<PluginRequest>> {
             continue;
         }
 
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        let mut parts: Vec<&str> = line.splitn(3, ':').collect();
+        let url_in_version_slot = parts.len() == 3
+            && matches!(parts[1].trim(), "http" | "https" | "file")
+            && parts[2].starts_with("//");
+        let joined_url;
+        if url_in_version_slot {
+            joined_url = format!("{}:{}", parts[1].trim(), parts[2]);
+            parts = vec![parts[0], "", &joined_url];
+        }
         let name = parts[0].trim();
         if name.is_empty() {
             bail!("line {}: plugin name is empty", lineno + 1);
@@ -278,6 +289,20 @@ docker # inline comment
 
         assert_eq!(plugins[6].name, "docker");
         assert_eq!(plugins[6].version, VersionSpec::Latest);
+    }
+
+    #[test]
+    fn url_in_version_slot_is_treated_as_url() {
+        let plugins = parse_plugins_txt(
+            "my-plugin:https://repo.example/my-plugin.hpi\nlocal:file:///opt/local.hpi\n",
+        )
+        .unwrap();
+        assert_eq!(plugins[0].version, VersionSpec::Latest);
+        assert_eq!(
+            plugins[0].url.as_deref(),
+            Some("https://repo.example/my-plugin.hpi")
+        );
+        assert_eq!(plugins[1].url.as_deref(), Some("file:///opt/local.hpi"));
     }
 
     #[test]

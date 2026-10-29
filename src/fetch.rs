@@ -37,14 +37,24 @@ pub fn env_non_empty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-/// GET `url` as text, retrying network errors, 5xx and 429 responses with
+/// GET `url` as UTF-8 text; see [`get_bytes`] for the retry rules.
+pub async fn get_text(client: &reqwest::Client, url: &str) -> Result<String> {
+    let bytes = get_bytes(client, url).await?;
+    let text = String::from_utf8(bytes).with_context(|| format!("{url} is not UTF-8 text"))?;
+    Ok(match text.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => text,
+    })
+}
+
+/// GET `url`, retrying network errors, 5xx and 429 responses with
 /// exponential back-off. Other 4xx responses (e.g. a 404 for an unknown
 /// Jenkins version) fail immediately.
-pub async fn get_text(client: &reqwest::Client, url: &str) -> Result<String> {
+pub async fn get_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
     let mut attempt = 1;
     loop {
-        match try_get_text(client, url).await {
-            Ok(text) => return Ok(text),
+        match try_get_bytes(client, url).await {
+            Ok(bytes) => return Ok(bytes),
             Err(failure) if failure.retryable && attempt < MAX_ATTEMPTS => {
                 let wait = RETRY_BASE * 2u32.pow(attempt - 1);
                 eprintln!(
@@ -65,7 +75,7 @@ struct Failure {
     retryable: bool,
 }
 
-async fn try_get_text(client: &reqwest::Client, url: &str) -> Result<String, Failure> {
+async fn try_get_bytes(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, Failure> {
     let transient = |error: anyhow::Error| Failure {
         error,
         retryable: true,
@@ -86,8 +96,9 @@ async fn try_get_text(client: &reqwest::Client, url: &str) -> Result<String, Fai
     }
 
     response
-        .text()
+        .bytes()
         .await
+        .map(|b| b.to_vec())
         .with_context(|| format!("reading body of {url}"))
         .map_err(transient)
 }

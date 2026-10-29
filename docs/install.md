@@ -185,6 +185,7 @@ Priority order (mirrors the Java plugin manager):
 
 | Condition | URL used |
 |---|---|
+| Lock entry has `url:<url>` | `<url>` (`file://` is copied; no archives fallback) |
 | `JENKINS_UC_DOWNLOAD_URL` env var is set | `$JENKINS_UC_DOWNLOAD_URL/<n>/<v>/<n>.hpi` |
 | `JENKINS_UC_DOWNLOAD` env var is set (deprecated) | `$JENKINS_UC_DOWNLOAD/plugins/<n>/<v>/<n>.hpi` |
 | `JENKINS_UC` env var is set | `<scheme://host:port of JENKINS_UC>/download/plugins/<n>/<v>/<n>.hpi` |

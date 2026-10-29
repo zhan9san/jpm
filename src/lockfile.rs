@@ -38,7 +38,7 @@ impl FnvHasher {
 /// # Jenkins: 2.452.4
 /// # manifest-hash: a3f1b2c4d5e6f7a8
 /// #
-/// # name:version sha256:<hex>
+/// # name:version sha256:<b64> [url:<url>]
 /// git:5.7.0 sha256:abc123...
 /// credentials:1415.v831096eb_5534 sha256:def456...
 /// ```
@@ -74,32 +74,54 @@ pub fn render(
         } else {
             String::new()
         };
-        out.push_str(&format!("{}:{}{checksum}\n", plugin.name, plugin.version));
+        let url = plugin
+            .url
+            .as_deref()
+            .map(|u| format!(" url:{u}"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "{}:{}{checksum}{url}\n",
+            plugin.name, plugin.version
+        ));
     }
 
     out
 }
 
-/// Parse a `plugins-lock.txt` file back into a map of `name → (version, sha256)`.
+/// One plugin line of a lock file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockEntry {
+    pub version: String,
+    /// Base64 SHA-256 of the archive (`sha256:` field).
+    pub sha256: Option<String>,
+    /// Source URL for plugins not taken from the Update Center (`url:` field).
+    pub url: Option<String>,
+}
+
+/// Parse a `plugins-lock.txt` file back into a map of `name → LockEntry`.
 /// Lines starting with `#` and blank lines are ignored.
-#[allow(dead_code)]
-pub fn parse(content: &str) -> HashMap<String, (String, Option<String>)> {
+///
+/// Line format: `name:version [sha256:<b64>] [url:<url>]`.
+pub fn parse(content: &str) -> HashMap<String, LockEntry> {
     content
         .lines()
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
         .filter_map(|line| {
-            // Split on whitespace to separate `name:version` from optional `sha256:...`
-            let mut fields = line.splitn(2, ' ');
-            let nv = fields.next()?.trim();
-            let sha256 = fields
-                .next()
-                .and_then(|f| f.trim().strip_prefix("sha256:"))
-                .map(str::to_owned);
-
-            let mut parts = nv.splitn(2, ':');
-            let name = parts.next()?.trim().to_string();
-            let version = parts.next()?.trim().to_string();
-            Some((name, (version, sha256)))
+            let mut fields = line.split_whitespace();
+            let (name, version) = fields.next()?.split_once(':')?;
+            let mut entry = LockEntry {
+                version: version.trim().to_string(),
+                sha256: None,
+                url: None,
+            };
+            for field in fields {
+                if let Some(v) = field.strip_prefix("sha256:") {
+                    entry.sha256 = Some(v.to_string());
+                } else if let Some(v) = field.strip_prefix("url:") {
+                    entry.url = Some(v.to_string());
+                }
+            }
+            Some((name.trim().to_string(), entry))
         })
         .collect()
 }
@@ -130,6 +152,7 @@ mod tests {
             version: version.to_string(),
             sha256: sha256.map(str::to_owned),
             is_direct: true,
+            url: None,
         }
     }
 
@@ -150,10 +173,34 @@ mod tests {
         assert!(rendered.contains("credentials:1415.v831096eb_5534\n"));
 
         let parsed = parse(&rendered);
-        assert_eq!(parsed["git"].0, "5.7.0");
-        assert_eq!(parsed["git"].1.as_deref(), Some("aabbccdd"));
-        assert_eq!(parsed["credentials"].0, "1415.v831096eb_5534");
-        assert!(parsed["credentials"].1.is_none());
+        assert_eq!(parsed["git"].version, "5.7.0");
+        assert_eq!(parsed["git"].sha256.as_deref(), Some("aabbccdd"));
+        assert_eq!(parsed["credentials"].version, "1415.v831096eb_5534");
+        assert!(parsed["credentials"].sha256.is_none());
+    }
+
+    #[test]
+    fn render_and_parse_url_field() {
+        let mut plugin = make_plugin("my-plugin", "1.0", Some("c2hh"));
+        plugin.url = Some("https://repo.example/my-plugin-1.0.hpi".to_string());
+        let plugins = HashMap::from([("my-plugin".to_string(), plugin)]);
+
+        let rendered = render(&plugins, "2.452.4", "", true);
+        assert!(rendered
+            .contains("my-plugin:1.0 sha256:c2hh url:https://repo.example/my-plugin-1.0.hpi\n"));
+        let parsed = parse(&rendered);
+        assert_eq!(
+            parsed["my-plugin"],
+            LockEntry {
+                version: "1.0".into(),
+                sha256: Some("c2hh".into()),
+                url: Some("https://repo.example/my-plugin-1.0.hpi".into()),
+            }
+        );
+
+        let rendered = render(&plugins, "2.452.4", "", false);
+        assert!(rendered.contains("my-plugin:1.0 url:https://repo.example/my-plugin-1.0.hpi\n"));
+        assert!(parse(&rendered)["my-plugin"].sha256.is_none());
     }
 
     #[test]
