@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 
+use crate::fetch;
+
 /// Detached plugin metadata extracted from Jenkins core resources.
 pub struct DetachedMetadata {
     /// plugin -> last core version that still contained the functionality.
@@ -10,13 +12,7 @@ pub struct DetachedMetadata {
 }
 
 pub async fn fetch(client: &reqwest::Client, jenkins_version: &str) -> Result<DetachedMetadata> {
-    let cache_dir = if let Ok(dir) = std::env::var("JPM_CACHE_DIR") {
-        std::path::PathBuf::from(dir)
-    } else {
-        dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-            .join("jpm")
-    };
+    let cache_dir = fetch::cache_dir();
     tokio::fs::create_dir_all(&cache_dir).await?;
 
     let split_plugins_cache = cache_dir.join(format!("split-plugins-{jenkins_version}.txt"));
@@ -81,15 +77,7 @@ async fn fetch_text_with_cache(
     }
 
     eprintln!("  fetching {url}");
-    let text = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("non-2xx from {url}"))?
-        .text()
-        .await?;
+    let text = fetch::get_text(client, url).await?;
 
     tokio::fs::write(cache_path, &text)
         .await

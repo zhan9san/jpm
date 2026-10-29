@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use crate::fetch;
 use crate::version::JenkinsVersion;
 
 const CACHE_TTL: Duration = Duration::from_secs(3600);
@@ -29,7 +30,7 @@ impl UpdateCenter {
         jenkins_version: &str,
         with_experimental: bool,
     ) -> Result<Self> {
-        let cache_dir = cache_dir();
+        let cache_dir = fetch::cache_dir();
         tokio::fs::create_dir_all(&cache_dir).await?;
 
         // Allow test / mirror overrides via environment variables.
@@ -216,6 +217,14 @@ mod tests {
     }
 
     #[test]
+    fn format_age_picks_largest_unit() {
+        assert_eq!(format_age(Duration::from_secs(42)), "42s");
+        assert_eq!(format_age(Duration::from_secs(150)), "2m");
+        assert_eq!(format_age(Duration::from_secs(7300)), "2h");
+        assert_eq!(format_age(Duration::from_secs(3 * 86400)), "3d");
+    }
+
+    #[test]
     fn highest_compatible_unknown_plugin() {
         let uc = make_uc(json!({ "plugins": {} }));
         let best = uc.highest_compatible_version("unknown", &JenkinsVersion::new("2.452.4"));
@@ -238,21 +247,32 @@ fn parse_deps(deps: &Value) -> Vec<(String, String, bool)> {
 }
 
 /// Fetch JSON from `url`, returning a cached copy if it exists and is fresh.
+///
+/// When every download attempt fails, an expired cache file is used instead
+/// (with a warning), so a flaky network or an offline run can still work
+/// from the last good copy.
 async fn fetch_json(client: &reqwest::Client, url: &str, cache_path: &Path) -> Result<Value> {
     if let Some(cached) = try_load_cache(cache_path).await {
         return Ok(cached);
     }
 
     eprintln!("  fetching {url}");
-    let text = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("GET {url}"))?
-        .error_for_status()
-        .with_context(|| format!("non-2xx from {url}"))?
-        .text()
-        .await?;
+    let text = match fetch::get_text(client, url).await {
+        Ok(text) => text,
+        Err(e) => {
+            return match load_stale_cache(cache_path).await {
+                Some((json, age)) => {
+                    eprintln!(
+                        "  warning: {e:#}; using cached copy from {} ago ({})",
+                        format_age(age),
+                        cache_path.display()
+                    );
+                    Ok(json)
+                }
+                None => Err(e),
+            };
+        }
+    };
     let text = strip_jsonp_wrapper(&text);
 
     let json: Value =
@@ -260,6 +280,27 @@ async fn fetch_json(client: &reqwest::Client, url: &str, cache_path: &Path) -> R
 
     tokio::fs::write(cache_path, text).await?;
     Ok(json)
+}
+
+/// Load a cache file regardless of its age, returning its parsed content and
+/// how old it is.
+async fn load_stale_cache(path: &Path) -> Option<(Value, Duration)> {
+    let modified = tokio::fs::metadata(path).await.ok()?.modified().ok()?;
+    let age = SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    Some((serde_json::from_str(&text).ok()?, age))
+}
+
+fn format_age(age: Duration) -> String {
+    let secs = age.as_secs();
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
 }
 
 /// `update-center.json` (unlike `update-center.actual.json`) is JSONP:
@@ -285,13 +326,4 @@ async fn try_load_cache(path: &Path) -> Option<Value> {
     }
     let text = tokio::fs::read_to_string(path).await.ok()?;
     serde_json::from_str(&text).ok()
-}
-
-fn cache_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("JPM_CACHE_DIR") {
-        return std::path::PathBuf::from(dir);
-    }
-    dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-        .join("jpm")
 }

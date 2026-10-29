@@ -764,3 +764,54 @@ async fn install_is_all_or_nothing_unless_skip_failed() {
     assert!(!plugin_dir.join("mailer.jpi").exists());
     assert!(jpm_leftovers(&plugin_dir).is_empty());
 }
+
+/// When the Update Center is unreachable, `jpm lock` falls back to an expired
+/// cache file (with a warning) instead of failing.
+#[tokio::test]
+async fn lock_falls_back_to_stale_cache_when_uc_is_down() {
+    let mock = start_mock_uc().await;
+    let tmp = TempDir::new().unwrap();
+    let manifest = tmp.path().join("plugins.txt");
+    let lock_file = tmp.path().join("plugins-lock.txt");
+    fs::write(&manifest, "git\n").unwrap();
+    let lock_args = [
+        "lock",
+        "-j",
+        JENKINS_VERSION,
+        "--skip-bundled",
+        "-f",
+        manifest.to_str().unwrap(),
+        "-o",
+        lock_file.to_str().unwrap(),
+    ];
+
+    // Populate the cache, then make every cached UC file 2 hours old.
+    jpm(&mock, &tmp).args(lock_args).assert().success();
+    let expected = fs::read_to_string(&lock_file).unwrap();
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    for name in [
+        format!("uc-{JENKINS_VERSION}.json"),
+        "plugin-versions.json".into(),
+    ] {
+        fs::File::options()
+            .write(true)
+            .open(tmp.path().join(name))
+            .unwrap()
+            .set_modified(two_hours_ago)
+            .unwrap();
+    }
+
+    // Same cache, but every UC request now fails.
+    let down = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&down)
+        .await;
+    let assert = jpm(&down, &tmp).args(lock_args).assert().success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("using cached copy from 2h ago"),
+        "stderr:\n{stderr}"
+    );
+    assert_eq!(fs::read_to_string(&lock_file).unwrap(), expected);
+}
