@@ -9,10 +9,12 @@ use crate::lockfile;
 use crate::parser;
 use crate::resolver::{self, ResolvedPlugin};
 use crate::update_center::UpdateCenter;
+use crate::war;
 
 #[derive(Debug)]
 pub struct GraphArgs {
-    pub jenkins_version: String,
+    pub jenkins_version: Option<String>,
+    pub war: Option<PathBuf>,
     pub plugin_file: Option<PathBuf>,
     pub lock_file: Option<PathBuf>,
     pub output: PathBuf,
@@ -25,16 +27,25 @@ pub async fn run(client: &reqwest::Client, args: GraphArgs) -> Result<()> {
         bail!("exactly one of --file or --lock must be specified");
     }
 
-    println!(
-        "jpm graph: building dependency graph for Jenkins {}",
-        args.jenkins_version
-    );
+    let war = match &args.war {
+        Some(path) => Some(war::read(path).await?),
+        None => None,
+    };
+    let jenkins_version = war::jenkins_version(args.jenkins_version.as_deref(), war.as_ref())?;
+    println!("jpm graph: building dependency graph for Jenkins {jenkins_version}");
+    let (war_bundled, war_detached) = match war {
+        Some(w) => (Some(w.bundled), Some(w.detached)),
+        None => (None, None),
+    };
 
     let bundled_fut = async {
         if args.skip_bundled {
             return Ok(HashMap::new());
         }
-        match bundled::fetch_bundled_plugins(client, &args.jenkins_version).await {
+        if let Some(map) = war_bundled {
+            return Ok(map);
+        }
+        match bundled::fetch_bundled_plugins(client, &jenkins_version).await {
             Ok(map) => Ok(map),
             Err(e) => {
                 eprintln!("  warning: could not fetch bundled plugins: {e}");
@@ -54,9 +65,14 @@ pub async fn run(client: &reqwest::Client, args: GraphArgs) -> Result<()> {
     let with_experimental = requests.as_deref().is_some_and(parser::uses_experimental);
 
     let (uc, bundled, detached) = tokio::try_join!(
-        UpdateCenter::fetch(client, &args.jenkins_version, with_experimental),
+        UpdateCenter::fetch(client, &jenkins_version, with_experimental),
         bundled_fut,
-        detached::fetch(client, &args.jenkins_version),
+        async {
+            match war_detached {
+                Some(d) => Ok(d),
+                None => detached::fetch(client, &jenkins_version).await,
+            }
+        },
     )
     .context("fetching remote data")?;
 
@@ -67,10 +83,9 @@ pub async fn run(client: &reqwest::Client, args: GraphArgs) -> Result<()> {
         let content = std::fs::read_to_string(lock_file)
             .with_context(|| format!("reading lock '{}'", lock_file.display()))?;
         if let Some(v) = lockfile::parse_jenkins_version(&content) {
-            if v != args.jenkins_version {
+            if v != jenkins_version {
                 eprintln!(
-                    "  warning: lock Jenkins version is {v}, but --jenkins-version is {}",
-                    args.jenkins_version
+                    "  warning: lock Jenkins version is {v}, but the target is {jenkins_version}"
                 );
             }
         }

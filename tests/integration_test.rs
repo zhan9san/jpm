@@ -1048,3 +1048,96 @@ async fn credentials_are_sent_only_to_matching_mirror() {
         .iter()
         .all(|r| !r.headers.contains_key("authorization")));
 }
+
+/// Build a minimal `jenkins.war` for `version` with one detached plugin and
+/// the split-plugin lists inside `jenkins-core`.
+fn fake_war(version: &str) -> Vec<u8> {
+    use std::io::Write;
+    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            for (name, data) in entries {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(data).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+    let core = zip_of(&[
+        (
+            "jenkins/split-plugins.txt",
+            b"sshd 2.281 3.236.ved5e1b_cb_50b_2\n",
+        ),
+        (
+            "jenkins/split-plugin-cycles.txt",
+            b"javax-activation-api sshd\n",
+        ),
+    ]);
+    let manifest = format!("Manifest-Version: 1.0\r\nJenkins-Version: {version}\r\n");
+    let mailer = plugin_archive("mailer", "472.vf7c289a_4b_c36");
+    let core_path = format!("WEB-INF/lib/jenkins-core-{version}.jar");
+    zip_of(&[
+        ("META-INF/MANIFEST.MF", manifest.as_bytes()),
+        ("WEB-INF/detached-plugins/mailer.hpi", &mailer),
+        (&core_path, &core),
+    ])
+}
+
+/// `jpm lock --war` takes the Jenkins version, bundled plugins and split
+/// metadata from the WAR and never asks GitHub; `-j` must match the WAR.
+#[tokio::test]
+async fn lock_reads_jenkins_version_and_bundled_plugins_from_war() {
+    let mock = start_mock_uc().await;
+    let tmp = TempDir::new().unwrap();
+    let war = tmp.path().join("jenkins.war");
+    let manifest = tmp.path().join("plugins.txt");
+    let lock_file = tmp.path().join("plugins-lock.txt");
+    fs::write(&war, fake_war(JENKINS_VERSION)).unwrap();
+    fs::write(&manifest, "git\n").unwrap();
+    let args = [
+        "lock",
+        "--war",
+        war.to_str().unwrap(),
+        "-f",
+        manifest.to_str().unwrap(),
+        "-o",
+        lock_file.to_str().unwrap(),
+    ];
+
+    let assert = jpm(&mock, &tmp)
+        .env_remove("JENKINS_VERSION")
+        .args(args)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("1 plugin(s) bundled in Jenkins WAR"),
+        "stdout:\n{stdout}"
+    );
+    let lock = fs::read_to_string(&lock_file).unwrap();
+    assert!(lock.contains("# Jenkins: 2.452.4"), "lock:\n{lock}");
+    assert!(lock.contains("git:5.7.0"), "lock:\n{lock}");
+
+    let github_hits = mock
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().starts_with("/pom/") || r.url.path().starts_with("/jenkins/"))
+        .count();
+    assert_eq!(github_hits, 0, "pom.xml / split-plugins were fetched");
+
+    let assert = jpm(&mock, &tmp)
+        .args(args)
+        .args(["-j", "2.440.3"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("does not match the WAR, which is Jenkins 2.452.4"),
+        "stderr:\n{stderr}"
+    );
+}
