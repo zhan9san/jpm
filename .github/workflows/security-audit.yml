@@ -6,11 +6,13 @@ on:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - ".github/workflows/security-audit.yml"
   pull_request:
     branches: [main]
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - ".github/workflows/security-audit.yml"
   schedule:
     # Weekly advisory check against default branch.
     - cron: "0 7 * * 1"
@@ -24,6 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: rustsec/audit-check@v2
+      # Prebuilt binary: building cargo-audit from source took ~3 minutes.
+      - uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+
+      - run: cargo audit
