@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::lockfile;
+use crate::lockfile::{self, LockEntry};
 use crate::manifest;
 
 pub struct DoctorOptions {
@@ -102,7 +102,7 @@ pub fn run(opts: &DoctorOptions) -> Result<()> {
 }
 
 fn collect_findings(
-    lock_entries: &HashMap<String, (String, Option<String>)>,
+    lock_entries: &HashMap<String, LockEntry>,
     plugin_files: &[PluginFile],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
@@ -128,7 +128,14 @@ fn collect_findings(
     }
 
     // JPM002 version_drift
-    for (name, (lock_version, _)) in lock_entries {
+    for (
+        name,
+        LockEntry {
+            version: lock_version,
+            ..
+        },
+    ) in lock_entries
+    {
         if let Some(files) = by_name.get(name) {
             let preferred = files
                 .iter()
@@ -267,9 +274,14 @@ mod tests {
         write_plugin(dir, "cred.jpi", "cred", "2.0");
         std::fs::write(dir.join("cred.jpi.disabled"), "").expect("write disabled marker");
 
+        let entry = |version: &str| LockEntry {
+            version: version.to_string(),
+            sha256: None,
+            url: None,
+        };
         let lock_entries = HashMap::from([
-            ("git".to_string(), ("1.1".to_string(), None)),
-            ("cred".to_string(), ("2.0".to_string(), None)),
+            ("git".to_string(), entry("1.1")),
+            ("cred".to_string(), entry("2.0")),
         ]);
         let plugin_files = scan_plugin_files(dir).expect("scan plugin files");
 

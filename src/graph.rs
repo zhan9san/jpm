@@ -9,6 +9,7 @@ use crate::lockfile;
 use crate::parser;
 use crate::resolver::{self, ResolvedPlugin};
 use crate::update_center::UpdateCenter;
+use crate::url_plugins;
 use crate::war;
 
 #[derive(Debug)]
@@ -64,7 +65,7 @@ pub async fn run(client: &reqwest::Client, args: GraphArgs) -> Result<()> {
     };
     let with_experimental = requests.as_deref().is_some_and(parser::uses_experimental);
 
-    let (uc, bundled, detached) = tokio::try_join!(
+    let (mut uc, bundled, detached) = tokio::try_join!(
         UpdateCenter::fetch(client, &jenkins_version, with_experimental),
         bundled_fut,
         async {
@@ -76,8 +77,12 @@ pub async fn run(client: &reqwest::Client, args: GraphArgs) -> Result<()> {
     )
     .context("fetching remote data")?;
 
-    let resolved = if let Some(requests) = &requests {
-        resolver::resolve(requests, &uc)
+    let resolved = if let Some(mut requests) = requests {
+        let url_plugins = url_plugins::load(client, &requests).await?;
+        url_plugins::apply(&mut uc, &mut requests, &url_plugins);
+        let resolved = resolver::resolve(&requests, &uc);
+        url_plugins::check_kept(&resolved, &url_plugins)?;
+        resolved
     } else {
         let lock_file = args.lock_file.as_ref().expect("lock_file present");
         let content = std::fs::read_to_string(lock_file)
@@ -89,16 +94,26 @@ pub async fn run(client: &reqwest::Client, args: GraphArgs) -> Result<()> {
                 );
             }
         }
-        lockfile::parse(&content)
+        let entries = lockfile::parse(&content);
+        // URL plugins are not in the Update Center: read their manifests so
+        // their dependency edges are part of the graph.
+        for (name, entry) in &entries {
+            if let Some(url) = &entry.url {
+                let p = url_plugins::fetch_plugin(client, name, url, Some(&entry.version)).await?;
+                uc.add_url_plugin(&p);
+            }
+        }
+        entries
             .into_iter()
-            .map(|(name, (version, sha256))| {
+            .map(|(name, entry)| {
                 (
                     name.clone(),
                     ResolvedPlugin {
                         name,
-                        version,
-                        sha256,
+                        version: entry.version,
+                        sha256: entry.sha256,
                         is_direct: false,
+                        url: entry.url,
                     },
                 )
             })

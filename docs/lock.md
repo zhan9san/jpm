@@ -45,6 +45,16 @@ Version rules:
 
 Comments and blank lines are allowed.
 
+Plugins that are not in the Update Center (e.g. in-house builds) can be given
+a `http(s)://` or `file://` URL: `artifact::url` (version from the archive) or
+`artifact:version:url` (must equal the archive's version). `artifact:url` is
+read as `artifact::url`. JPM downloads the archive while locking and takes its
+version, `Jenkins-Version` and `Plugin-Dependencies` from the manifest; the
+dependencies are resolved from the Update Center as usual. The lock line
+records the archive's SHA-256 and source URL, and `jpm install` fetches it
+from there. `--fix` and `--upgrade` never change URL plugins, and locking
+fails if another plugin needs a newer version than the archive provides.
+
 ## What gets written (`plugins-lock.txt`)
 
 The lock file contains:
@@ -54,6 +64,7 @@ The lock file contains:
 - One line per resolved plugin:
   - default: `name:version sha256:<base64>`
   - with `--no-sha256`: `name:version`
+  - plugins from a URL: `name:version sha256:<base64> url:<url>`
 
 Example:
 
