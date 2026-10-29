@@ -4,6 +4,8 @@ use quick_xml::Reader;
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::fetch;
+
 /// Fetch the list of plugins bundled inside the Jenkins WAR for a given
 /// Jenkins version by parsing the `war/pom.xml` from GitHub.
 ///
@@ -13,13 +15,7 @@ pub async fn fetch_bundled_plugins(
     client: &reqwest::Client,
     jenkins_version: &str,
 ) -> Result<HashMap<String, String>> {
-    let cache_dir = if let Ok(dir) = std::env::var("JPM_CACHE_DIR") {
-        std::path::PathBuf::from(dir)
-    } else {
-        dirs::cache_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from(".cache"))
-            .join("jpm")
-    };
+    let cache_dir = fetch::cache_dir();
     tokio::fs::create_dir_all(&cache_dir).await?;
 
     let cache_path = cache_dir.join(format!("pom-{jenkins_version}.xml"));
@@ -32,15 +28,9 @@ pub async fn fetch_bundled_plugins(
         });
         let url = format!("{pom_base}{jenkins_version}/war/pom.xml");
         eprintln!("  fetching bundled plugins from {url}");
-        let text = client
-            .get(&url)
-            .send()
+        let text = fetch::get_text(client, &url)
             .await
-            .with_context(|| format!("GET {url}"))?
-            .error_for_status()
-            .with_context(|| format!("non-2xx fetching pom.xml for Jenkins {jenkins_version}"))?
-            .text()
-            .await?;
+            .with_context(|| format!("fetching pom.xml for Jenkins {jenkins_version}"))?;
         tokio::fs::write(&cache_path, &text).await?;
         text
     };
