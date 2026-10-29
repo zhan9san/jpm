@@ -81,16 +81,29 @@ pub async fn install(client: &reqwest::Client, opts: &InstallOptions) -> Result<
         return Ok(());
     }
 
-    // 5. Spawn one tokio task per plugin; a semaphore caps how many
-    //    downloads run at the same time.
+    // 5. Download everything into a staging directory inside the plugin
+    //    directory (same filesystem, so the final rename is atomic). Nothing
+    //    in the plugin directory changes until every download is verified.
     println!("downloading...");
 
+    let staging = tempfile::Builder::new()
+        .prefix(".jpm-staging-")
+        .tempdir_in(&opts.plugin_dir)
+        .with_context(|| {
+            format!(
+                "creating staging directory in '{}'",
+                opts.plugin_dir.display()
+            )
+        })?;
+
+    // One tokio task per plugin; a semaphore caps how many downloads run at
+    // the same time.
     let permits = Arc::new(Semaphore::new(opts.concurrency.max(1)));
     let mut handles = Vec::with_capacity(to_download.len());
 
     for (name, version, sha256) in to_download {
         let client = client.clone();
-        let dir = opts.plugin_dir.clone();
+        let dir = staging.path().to_path_buf();
         let permits = Arc::clone(&permits);
 
         handles.push(tokio::spawn(async move {
@@ -99,32 +112,26 @@ pub async fn install(client: &reqwest::Client, opts: &InstallOptions) -> Result<
                 .await
                 .expect("semaphore is never closed");
             let result =
-                download_and_install(&client, &name, &version, sha256.as_deref(), &dir).await;
+                download_and_stage(&client, &name, &version, sha256.as_deref(), &dir).await;
             (name, result)
         }));
     }
 
     // 6. Collect results — wait for all tasks regardless of individual failures.
-    let mut installed_count = 0usize;
+    let mut staged: Vec<(String, PathBuf)> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
 
     for handle in handles {
         let (name, result) = handle.await.context("download task panicked")?;
         match result {
-            Ok(()) => {
-                println!("  installed {name}");
-                installed_count += 1;
-            }
+            Ok(path) => staged.push((name, path)),
             Err(e) => {
                 eprintln!("  failed {name}: {e:#}");
                 failed.push(name);
             }
         }
     }
-
-    // 7. Summary.
-    println!();
-    println!("installed {} plugin(s)", installed_count);
+    staged.sort();
 
     if !failed.is_empty() {
         eprintln!(
@@ -133,8 +140,27 @@ pub async fn install(client: &reqwest::Client, opts: &InstallOptions) -> Result<
             failed.join(", ")
         );
         if !opts.skip_failed {
-            bail!("{} plugin(s) failed to install", failed.len());
+            // `staging` is removed on drop, so the plugin directory is left
+            // exactly as it was.
+            bail!(
+                "{} plugin(s) failed to download; '{}' was left unchanged",
+                failed.len(),
+                opts.plugin_dir.display()
+            );
         }
+    }
+
+    // 7. Commit: move every verified archive into the plugin directory.
+    for (name, path) in &staged {
+        move_into_place(&opts.plugin_dir, name, path).await?;
+        println!("  installed {name}");
+    }
+
+    // 8. Summary.
+    println!();
+    println!("installed {} plugin(s)", staged.len());
+    if !failed.is_empty() {
+        eprintln!("skipped   {} failed plugin(s)", failed.len());
     }
 
     Ok(())
@@ -174,30 +200,31 @@ pub fn scan_installed(dir: &Path) -> Result<HashMap<String, String>> {
 
 // ── Downloading ───────────────────────────────────────────────────────────────
 
-/// Download one plugin, verify its checksum, and move it to `plugin_dir`.
+/// Download one plugin into `staging_dir/<name>.jpi` and verify it.
 ///
-/// The archive is streamed to `<plugin_dir>/.jpm-<name>.tmp` and only renamed
-/// to `<name>.jpi` once it passed verification, so Jenkins never sees a
-/// partial or unverified file.
-async fn download_and_install(
+/// Returns the path of the verified archive. On failure the partial file is
+/// removed, so only verified archives are left in the staging directory.
+async fn download_and_stage(
     client: &reqwest::Client,
     name: &str,
     version: &str,
     expected_sha256: Option<&str>,
-    plugin_dir: &Path,
-) -> Result<()> {
-    let tmp_path = plugin_dir.join(format!(".jpm-{name}.tmp"));
+    staging_dir: &Path,
+) -> Result<PathBuf> {
+    let path = staging_dir.join(format!("{name}.jpi"));
     let result = async {
-        let computed = download_with_retry(client, name, version, &tmp_path).await?;
+        let computed = download_with_retry(client, name, version, &path).await?;
         verify_sha256(&computed, expected_sha256, name)?;
-        verify_archive(&tmp_path, name, version).await?;
-        move_into_place(plugin_dir, name, &tmp_path).await
+        verify_archive(&path, name, version).await
     }
     .await;
-    if result.is_err() {
-        tokio::fs::remove_file(&tmp_path).await.ok();
+    match result {
+        Ok(()) => Ok(path),
+        Err(e) => {
+            tokio::fs::remove_file(&path).await.ok();
+            Err(e)
+        }
     }
-    result
 }
 
 /// Download a plugin into `dest`, retrying the primary URL up to `MAX_RETRIES`
@@ -350,24 +377,24 @@ fn check_manifest(headers: &HashMap<String, String>, name: &str, version: &str) 
     Ok(())
 }
 
-/// Move the verified archive at `tmp_path` to `<plugin_dir>/<name>.jpi`.
+/// Move the verified archive at `staged` to `<plugin_dir>/<name>.jpi`.
 ///
 /// An existing `<name>.jpi` is kept as `<name>.bak`, which is the file the
 /// Jenkins plugin manager offers for "Downgrade to …".
 ///
 /// Uses `tokio::fs::rename` (atomic on the same filesystem). Falls back to
 /// copy + delete when source and destination are on different devices.
-async fn move_into_place(plugin_dir: &Path, name: &str, tmp_path: &Path) -> Result<()> {
+async fn move_into_place(plugin_dir: &Path, name: &str, staged: &Path) -> Result<()> {
     let final_path = plugin_dir.join(format!("{name}.jpi"));
 
     backup_existing(plugin_dir, name).await?;
 
-    if tokio::fs::rename(tmp_path, &final_path).await.is_err() {
-        // Cross-device fallback: copy then delete the temp file.
-        tokio::fs::copy(tmp_path, &final_path)
+    if tokio::fs::rename(staged, &final_path).await.is_err() {
+        // Cross-device fallback: copy then delete the staged file.
+        tokio::fs::copy(staged, &final_path)
             .await
             .with_context(|| format!("moving {name}.jpi into plugin directory"))?;
-        tokio::fs::remove_file(tmp_path).await.ok();
+        tokio::fs::remove_file(staged).await.ok();
     }
 
     Ok(())

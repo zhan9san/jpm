@@ -108,9 +108,9 @@ how many downloads run at once (`--concurrency`, default 8). Each task:
    `JENKINS_UC_DOWNLOAD` environment variables as overrides (mirrors the Java
    tool's behaviour, see [Download URL Construction](#download-url-construction)).
 
-2. Stream the response to `<plugin-dir>/.jpm-<name>.tmp`, computing the
-   SHA-256 while writing, so archives are never held in memory and Jenkins
-   never sees a partial `.jpi`.
+2. Stream the response to `<plugin-dir>/.jpm-staging-<random>/<name>.jpi`,
+   computing the SHA-256 while writing, so archives are never held in memory
+   and Jenkins never sees a partial `.jpi`.
 
 3. On network error or non-2xx status: retry up to **3 times** with a brief
    back-off, then fall back to the archives mirror:
@@ -146,11 +146,15 @@ an HTML error page even when there is no checksum to compare.
 
 ### 6. Atomic move to plugin directory
 
-Once verified, move the temp file to its final location:
+Only after **every** download is verified (or with `--skip-failed`, after
+all downloads finished) move the staged files to their final location:
 
 ```text
-<tempdir>/<name>.hpi  →  <plugin-dir>/<name>.hpi
+<plugin-dir>/.jpm-staging-<random>/<name>.jpi  →  <plugin-dir>/<name>.jpi
 ```
+
+If any download fails without `--skip-failed`, the staging directory is
+removed and the plugin directory is left exactly as it was.
 
 Use `std::fs::rename` (atomic on the same filesystem). If `rename` fails
 (cross-device move), fall back to copy + delete.
@@ -163,8 +167,8 @@ file as "Downgrade to …" in its plugin manager.
 
 | Mode | Behaviour on failure |
 |---|---|
-| Default (strict) | Abort after all downloads complete; report all failures at once |
-| `--skip-failed` | Warn and continue; exit code 0 |
+| Default (strict) | Abort after all downloads complete; report all failures at once; plugin directory unchanged |
+| `--skip-failed` | Warn, install the plugins that succeeded; exit code 0 |
 
 Always print a final summary:
 
