@@ -37,7 +37,7 @@ pub async fn fetch(client: &reqwest::Client, jenkins_version: &str) -> Result<De
     })
 }
 
-fn parse_split_plugins(text: &str) -> HashMap<String, String> {
+pub fn parse_split_plugins(text: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for line in text.lines() {
         let line = line.trim();
@@ -52,7 +52,7 @@ fn parse_split_plugins(text: &str) -> HashMap<String, String> {
     out
 }
 
-fn parse_break_cycles(text: &str) -> Vec<(String, String)> {
+pub fn parse_break_cycles(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();

@@ -13,10 +13,11 @@ It is the "resolve and pin" step in JPM:
 ## Command
 
 ```text
-jpm lock -j <VERSION> [OPTIONS]
+jpm lock (-j <VERSION> | -w <jenkins.war>) [OPTIONS]
 
 Options:
-  -j, --jenkins-version <VERSION>  Target Jenkins version (required)
+  -j, --jenkins-version <VERSION>  Target Jenkins version (or JENKINS_VERSION)
+  -w, --war <FILE>                 Take version, bundled and split plugins from a local WAR
   -f, --plugin-file <FILE>         Input manifest [default: plugins.txt]
   -o, --output <FILE>              Output lock file [default: plugins-lock.txt]
       --skip-bundled               Skip WAR bundled plugin lookup
@@ -129,6 +130,14 @@ Bundled metadata is still used for effective graph construction in cycle checks
 bundled-aware.
 
 Use `--skip-bundled` for faster runs if you do not need bundled-awareness.
+
+The bundled list comes from `war/pom.xml` and the split/detached metadata from
+`split-plugins.txt` / `split-plugin-cycles.txt`, all on raw.githubusercontent.com.
+With `--war jenkins.war` they are read from the WAR instead
+(`WEB-INF/detached-plugins/*.hpi` and `WEB-INF/lib/jenkins-core-*.jar`), together
+with the Jenkins version (`Jenkins-Version` in `META-INF/MANIFEST.MF`), so no
+GitHub access is needed and `-j` becomes optional. When both are given they
+must match. `graph` and `roots` accept `--war` the same way.
 
 ## Staleness warning
 
