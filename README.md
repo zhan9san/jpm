@@ -48,11 +48,11 @@ xattr -d com.apple.quarantine jpm
 ## Usage
 
 ```bash
-jpm lock    -j <VERSION> [-f plugins.txt] [-o plugins-lock.txt] [--fix] [--upgrade]
+jpm lock    (-j <VERSION> | --war jenkins.war) [-f plugins.txt] [-o plugins-lock.txt] [--fix] [--upgrade]
 jpm install [-l plugins-lock.txt] [-d ./plugins/] [--dry-run] [--skip-failed] [--concurrency N]
 jpm doctor  [-l plugins-lock.txt] [-d ./plugins/] [--strict]
-jpm graph   -j <VERSION> (-f plugins.txt | -l plugins-lock.txt) [-o plugins-graph.dot] [--allow-cycle]
-jpm roots   -j <VERSION> [-f plugins.txt] [--write] [--keep <PLUGIN>]
+jpm graph   (-j <VERSION> | --war jenkins.war) (-f plugins.txt | -l plugins-lock.txt) [-o plugins-graph.dot] [--allow-cycle]
+jpm roots   (-j <VERSION> | --war jenkins.war) [-f plugins.txt] [--write] [--keep <PLUGIN>]
 ```
 
 | Situation | Command |

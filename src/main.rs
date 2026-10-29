@@ -13,6 +13,7 @@ mod roots;
 mod security;
 mod update_center;
 mod version;
+mod war;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -58,9 +59,20 @@ enum Command {
 
 #[derive(Args, Debug)]
 struct LockArgs {
-    /// Jenkins version to target (e.g. `2.452.4`).
-    #[arg(short = 'j', long, value_name = "VERSION", env = "JENKINS_VERSION")]
-    jenkins_version: String,
+    /// Jenkins version to target (e.g. `2.452.4`). Optional with `--war`.
+    #[arg(
+        short = 'j',
+        long,
+        value_name = "VERSION",
+        env = "JENKINS_VERSION",
+        required_unless_present = "war"
+    )]
+    jenkins_version: Option<String>,
+
+    /// Local `jenkins.war`: take the Jenkins version, bundled plugins and
+    /// split-plugin metadata from it instead of GitHub.
+    #[arg(short = 'w', long, value_name = "FILE")]
+    war: Option<PathBuf>,
 
     /// Path to the input `plugins.txt` manifest.
     #[arg(short = 'f', long, value_name = "FILE", default_value = "plugins.txt")]
@@ -172,9 +184,20 @@ struct DoctorArgs {
 
 #[derive(Args, Debug)]
 struct GraphArgs {
-    /// Jenkins version to target (e.g. `2.452.4`).
-    #[arg(short = 'j', long, value_name = "VERSION", env = "JENKINS_VERSION")]
-    jenkins_version: String,
+    /// Jenkins version to target (e.g. `2.452.4`). Optional with `--war`.
+    #[arg(
+        short = 'j',
+        long,
+        value_name = "VERSION",
+        env = "JENKINS_VERSION",
+        required_unless_present = "war"
+    )]
+    jenkins_version: Option<String>,
+
+    /// Local `jenkins.war`: take the Jenkins version, bundled plugins and
+    /// split-plugin metadata from it instead of GitHub.
+    #[arg(short = 'w', long, value_name = "FILE")]
+    war: Option<PathBuf>,
 
     /// Path to input plugins.txt manifest.
     #[arg(short = 'f', long, value_name = "FILE")]
@@ -206,9 +229,20 @@ struct GraphArgs {
 
 #[derive(Args, Debug)]
 struct RootsArgs {
-    /// Jenkins version to target (e.g. `2.452.4`).
-    #[arg(short = 'j', long, value_name = "VERSION", env = "JENKINS_VERSION")]
-    jenkins_version: String,
+    /// Jenkins version to target (e.g. `2.452.4`). Optional with `--war`.
+    #[arg(
+        short = 'j',
+        long,
+        value_name = "VERSION",
+        env = "JENKINS_VERSION",
+        required_unless_present = "war"
+    )]
+    jenkins_version: Option<String>,
+
+    /// Local `jenkins.war`: take the Jenkins version, bundled plugins and
+    /// split-plugin metadata from it instead of GitHub.
+    #[arg(short = 'w', long, value_name = "FILE")]
+    war: Option<PathBuf>,
 
     /// Path to input plugins.txt manifest.
     #[arg(short = 'f', long, value_name = "FILE", default_value = "plugins.txt")]
@@ -247,10 +281,22 @@ async fn main() -> Result<()> {
 }
 
 async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
-    println!(
-        "jpm lock: resolving plugins for Jenkins {}",
-        args.jenkins_version
-    );
+    let war = match &args.war {
+        Some(path) => Some(war::read(path).await?),
+        None => None,
+    };
+    let jenkins_version = war::jenkins_version(args.jenkins_version.as_deref(), war.as_ref())?;
+    println!("jpm lock: resolving plugins for Jenkins {jenkins_version}");
+    if let Some(path) = &args.war {
+        println!(
+            "  using bundled and split plugins from '{}'",
+            path.display()
+        );
+    }
+    let (war_bundled, war_detached) = match war {
+        Some(w) => (Some(w.bundled), Some(w.detached)),
+        None => (None, None),
+    };
 
     let manifest_text = std::fs::read_to_string(&args.plugin_file)
         .with_context(|| format!("reading manifest '{}'", args.plugin_file.display()))?;
@@ -264,7 +310,10 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
         if args.skip_bundled {
             return Ok(HashMap::new());
         }
-        match bundled::fetch_bundled_plugins(client, &args.jenkins_version).await {
+        if let Some(map) = war_bundled {
+            return Ok(map);
+        }
+        match bundled::fetch_bundled_plugins(client, &jenkins_version).await {
             Ok(map) => Ok(map),
             Err(e) => {
                 eprintln!("  warning: could not fetch bundled plugins: {e}");
@@ -276,11 +325,16 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
     let (uc, bundled, detached) = tokio::try_join!(
         update_center::UpdateCenter::fetch(
             client,
-            &args.jenkins_version,
+            &jenkins_version,
             parser::uses_experimental(&requests),
         ),
         bundled_fut,
-        detached::fetch(client, &args.jenkins_version),
+        async {
+            match war_detached {
+                Some(d) => Ok(d),
+                None => detached::fetch(client, &jenkins_version).await,
+            }
+        },
     )
     .context("fetching remote data")?;
 
@@ -292,13 +346,13 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
     let mut resolved = resolver::resolve(&requests, &uc);
 
     // ── Jenkins version compatibility check ───────────────────────────────────
-    let compat_issues = resolver::check_compat(&resolved, &uc, &args.jenkins_version);
+    let compat_issues = resolver::check_compat(&resolved, &uc, &jenkins_version);
 
     if !compat_issues.is_empty() && !args.fix && !args.upgrade {
         for issue in &compat_issues {
             eprintln!(
                 "error: {}:{} requires Jenkins >= {} (target: {})",
-                issue.name, issue.version, issue.required_core, args.jenkins_version
+                issue.name, issue.version, issue.required_core, jenkins_version
             );
             match &issue.suggestion {
                 Some(v) => eprintln!("       → highest compatible version: {}:{}", issue.name, v),
@@ -312,13 +366,13 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
         anyhow::bail!(
             "{} plugin(s) incompatible with Jenkins {}",
             compat_issues.len(),
-            args.jenkins_version
+            jenkins_version
         );
     }
 
     // ── Build version update map (--fix and/or --upgrade) ────────────────────
     if args.fix || args.upgrade {
-        let target = JenkinsVersion::new(&args.jenkins_version);
+        let target = JenkinsVersion::new(&jenkins_version);
         let mut updates: HashMap<String, String> = HashMap::new();
 
         // --fix: fix only plugins that fail the compat check.
@@ -422,7 +476,7 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
 
     // ── Security warnings (informational, never fails the lock) ──────────────
     if !args.hide_security_warnings {
-        report_security_warnings(&resolved, &uc, &args.jenkins_version);
+        report_security_warnings(&resolved, &uc, &jenkins_version);
     }
 
     // ── Summary + lock file write ─────────────────────────────────────────────
@@ -453,7 +507,7 @@ async fn run_lock(client: &reqwest::Client, args: LockArgs) -> Result<()> {
         std::fs::read_to_string(&args.plugin_file).unwrap_or_else(|_| manifest_text.clone());
     let lock_content = lockfile::render(
         &resolved,
-        &args.jenkins_version,
+        &jenkins_version,
         &current_manifest,
         !args.no_sha256,
     );
@@ -528,6 +582,7 @@ async fn run_graph(client: &reqwest::Client, args: GraphArgs) -> Result<()> {
         client,
         graph::GraphArgs {
             jenkins_version: args.jenkins_version,
+            war: args.war,
             plugin_file: args.plugin_file,
             lock_file: args.lock_file,
             output: args.output,
@@ -543,6 +598,7 @@ async fn run_roots(client: &reqwest::Client, args: RootsArgs) -> Result<()> {
         client,
         roots::RootsOptions {
             jenkins_version: args.jenkins_version,
+            war: args.war,
             plugin_file: args.plugin_file,
             write: args.write,
             keep: args.keep,

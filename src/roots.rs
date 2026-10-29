@@ -6,20 +6,25 @@ use anyhow::{bail, Context, Result};
 use crate::parser;
 use crate::resolver;
 use crate::update_center::UpdateCenter;
+use crate::war;
 
 #[derive(Debug)]
 pub struct RootsOptions {
-    pub jenkins_version: String,
+    pub jenkins_version: Option<String>,
+    pub war: Option<PathBuf>,
     pub plugin_file: PathBuf,
     pub write: bool,
     pub keep: Vec<String>,
 }
 
 pub async fn run(client: &reqwest::Client, opts: RootsOptions) -> Result<()> {
-    println!(
-        "jpm roots: minimizing manifest for Jenkins {}",
-        opts.jenkins_version
-    );
+    // Roots only needs the Jenkins version from a WAR.
+    let war = match &opts.war {
+        Some(path) => Some(war::read(path).await?),
+        None => None,
+    };
+    let jenkins_version = war::jenkins_version(opts.jenkins_version.as_deref(), war.as_ref())?;
+    println!("jpm roots: minimizing manifest for Jenkins {jenkins_version}");
 
     let manifest_text = std::fs::read_to_string(&opts.plugin_file)
         .with_context(|| format!("reading manifest '{}'", opts.plugin_file.display()))?;
@@ -28,25 +33,25 @@ pub async fn run(client: &reqwest::Client, opts: RootsOptions) -> Result<()> {
 
     let uc = UpdateCenter::fetch(
         client,
-        &opts.jenkins_version,
+        &jenkins_version,
         parser::uses_experimental(&requests),
     )
     .await
     .context("fetching update center data")?;
     let resolved = resolver::resolve(&requests, &uc);
 
-    let compat_issues = resolver::check_compat(&resolved, &uc, &opts.jenkins_version);
+    let compat_issues = resolver::check_compat(&resolved, &uc, &jenkins_version);
     if !compat_issues.is_empty() {
         for issue in &compat_issues {
             eprintln!(
                 "error: {}:{} requires Jenkins >= {} (target: {})",
-                issue.name, issue.version, issue.required_core, opts.jenkins_version
+                issue.name, issue.version, issue.required_core, jenkins_version
             );
         }
         bail!(
             "{} plugin(s) incompatible with Jenkins {}",
             compat_issues.len(),
-            opts.jenkins_version
+            jenkins_version
         );
     }
 
