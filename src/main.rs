@@ -1,4 +1,5 @@
 mod bundled;
+mod credentials;
 mod detached;
 mod doctor;
 mod fetch;
@@ -26,6 +27,17 @@ use version::JenkinsVersion;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+
+    /// Basic-auth credentials for private mirrors, as a comma-separated list
+    /// of `host[:port]:username:password`. Only sent to matching hosts.
+    #[arg(
+        long,
+        global = true,
+        value_name = "CREDENTIALS",
+        env = "JENKINS_UC_CREDENTIALS",
+        hide_env_values = true
+    )]
+    credentials: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -216,6 +228,10 @@ struct RootsArgs {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(list) = &cli.credentials {
+        credentials::init(credentials::parse_list(list).context("parsing --credentials")?);
+    }
 
     let client = reqwest::Client::builder()
         .user_agent(concat!("jpm/", env!("CARGO_PKG_VERSION")))

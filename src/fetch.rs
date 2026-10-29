@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
+use crate::credentials;
+
 /// Attempts per URL before giving up.
 const MAX_ATTEMPTS: u32 = 3;
 
@@ -69,8 +71,7 @@ async fn try_get_text(client: &reqwest::Client, url: &str) -> Result<String, Fai
         retryable: true,
     };
 
-    let response = client
-        .get(url)
+    let response = credentials::get(client, url)
         .send()
         .await
         .with_context(|| format!("GET {url}"))

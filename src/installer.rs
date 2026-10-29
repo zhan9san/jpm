@@ -315,8 +315,7 @@ fn primary_download_url(
 /// on the way so the archive never has to be held in memory. Returns the
 /// Base64 SHA-256 of what was written.
 async fn download_to_file(client: &reqwest::Client, url: &str, dest: &Path) -> Result<String> {
-    let mut response = client
-        .get(url)
+    let mut response = crate::credentials::get(client, url)
         .send()
         .await
         .with_context(|| format!("GET {url}"))?
