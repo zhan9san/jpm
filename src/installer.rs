@@ -236,9 +236,11 @@ async fn download_with_retry(
     version: &str,
     dest: &Path,
 ) -> Result<String> {
+    let env = crate::fetch::env_non_empty;
     let primary_url = primary_download_url(
-        std::env::var("JENKINS_UC_DOWNLOAD_URL").ok().as_deref(),
-        std::env::var("JENKINS_UC_DOWNLOAD").ok().as_deref(),
+        env("JENKINS_UC_DOWNLOAD_URL").as_deref(),
+        env("JENKINS_UC_DOWNLOAD").as_deref(),
+        env("JENKINS_UC").as_deref(),
         name,
         version,
     );
@@ -275,26 +277,36 @@ async fn download_with_retry(
 }
 
 /// Build the primary download URL, honouring the mirror overrides of the Java
-/// plugin manager:
+/// plugin manager, in this order:
 ///
-/// - `JENKINS_UC_DOWNLOAD_URL` is the full base: `<base>/<n>/<v>/<n>.hpi`
-/// - `JENKINS_UC_DOWNLOAD` (deprecated) gets `/plugins` appended:
-///   `<base>/plugins/<n>/<v>/<n>.hpi`
+/// 1. `JENKINS_UC_DOWNLOAD_URL` is the full base: `<base>/<n>/<v>/<n>.hpi`
+/// 2. `JENKINS_UC_DOWNLOAD` (deprecated) gets `/plugins` appended:
+///    `<base>/plugins/<n>/<v>/<n>.hpi`
+/// 3. `JENKINS_UC`: the scheme, host and port of the Update Center, plus
+///    `/download/plugins/<n>/<v>/<n>.hpi`
 ///
-/// `JENKINS_UC_DOWNLOAD_URL` wins when both are set; empty values are ignored.
+/// Empty values are ignored.
 fn primary_download_url(
     download_url: Option<&str>,
     legacy_download: Option<&str>,
+    update_center: Option<&str>,
     name: &str,
     version: &str,
 ) -> String {
     fn non_empty(v: Option<&str>) -> Option<&str> {
         v.map(|s| s.trim_end_matches('/')).filter(|s| !s.is_empty())
     }
+    let uc_origin = || {
+        let url = reqwest::Url::parse(non_empty(update_center)?).ok()?;
+        let origin = url.origin();
+        origin
+            .is_tuple()
+            .then(|| format!("{}/download/plugins", origin.ascii_serialization()))
+    };
     let base = match (non_empty(download_url), non_empty(legacy_download)) {
         (Some(base), _) => base.to_string(),
         (None, Some(legacy)) => format!("{legacy}/plugins"),
-        (None, None) => PRIMARY_BASE.to_string(),
+        (None, None) => uc_origin().unwrap_or_else(|| PRIMARY_BASE.to_string()),
     };
     format!("{base}/{name}/{version}/{name}.hpi")
 }
@@ -427,7 +439,7 @@ mod tests {
     #[test]
     fn download_url_defaults_to_update_center() {
         assert_eq!(
-            primary_download_url(None, None, "git", "5.7.0"),
+            primary_download_url(None, None, None, "git", "5.7.0"),
             "https://updates.jenkins.io/download/plugins/git/5.7.0/git.hpi"
         );
     }
@@ -435,7 +447,13 @@ mod tests {
     #[test]
     fn download_url_uses_full_base_from_download_url_env() {
         assert_eq!(
-            primary_download_url(Some("https://m.example/dl/plugins/"), None, "git", "5.7.0"),
+            primary_download_url(
+                Some("https://m.example/dl/plugins/"),
+                None,
+                None,
+                "git",
+                "5.7.0"
+            ),
             "https://m.example/dl/plugins/git/5.7.0/git.hpi"
         );
     }
@@ -443,8 +461,42 @@ mod tests {
     #[test]
     fn download_url_appends_plugins_to_legacy_env() {
         assert_eq!(
-            primary_download_url(None, Some("https://m.example/download"), "git", "5.7.0"),
+            primary_download_url(
+                None,
+                Some("https://m.example/download"),
+                None,
+                "git",
+                "5.7.0"
+            ),
             "https://m.example/download/plugins/git/5.7.0/git.hpi"
+        );
+    }
+
+    #[test]
+    fn download_url_derives_from_jenkins_uc_origin() {
+        assert_eq!(
+            primary_download_url(
+                None,
+                None,
+                Some("https://mirror.example:8443/jenkins/update-center.json"),
+                "git",
+                "5.7.0"
+            ),
+            "https://mirror.example:8443/download/plugins/git/5.7.0/git.hpi"
+        );
+        assert_eq!(
+            primary_download_url(
+                None,
+                Some("https://old.example"),
+                Some("https://uc.example"),
+                "git",
+                "5.7.0"
+            ),
+            "https://old.example/plugins/git/5.7.0/git.hpi"
+        );
+        assert_eq!(
+            primary_download_url(None, None, Some("not a url"), "git", "5.7.0"),
+            "https://updates.jenkins.io/download/plugins/git/5.7.0/git.hpi"
         );
     }
 
@@ -454,13 +506,14 @@ mod tests {
             primary_download_url(
                 Some("https://new.example/p"),
                 Some("https://old.example"),
+                Some("https://uc.example"),
                 "git",
                 "5.7.0"
             ),
             "https://new.example/p/git/5.7.0/git.hpi"
         );
         assert_eq!(
-            primary_download_url(Some(""), Some("https://old.example"), "git", "5.7.0"),
+            primary_download_url(Some(""), Some("https://old.example"), None, "git", "5.7.0"),
             "https://old.example/plugins/git/5.7.0/git.hpi"
         );
     }

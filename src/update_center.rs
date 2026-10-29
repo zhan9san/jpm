@@ -33,15 +33,21 @@ impl UpdateCenter {
         let cache_dir = fetch::cache_dir();
         tokio::fs::create_dir_all(&cache_dir).await?;
 
-        // Allow test / mirror overrides via environment variables.
-        let stable_base =
-            std::env::var("JPM_UC_STABLE_URL").unwrap_or_else(|_| UC_STABLE_URL.to_string());
-        let experimental_url = std::env::var("JPM_UC_EXPERIMENTAL_URL")
-            .unwrap_or_else(|_| UC_EXPERIMENTAL_URL.to_string());
-        let plugin_versions_url = std::env::var("JPM_UC_PLUGIN_VERSIONS_URL")
-            .unwrap_or_else(|_| UC_PLUGIN_VERSIONS_URL.to_string());
+        // Mirror overrides: the `JPM_*` variables first, then the ones
+        // plugin-installation-manager-tool reads.
+        let env = fetch::env_non_empty;
+        let stable_url = stable_url(
+            env("JPM_UC_STABLE_URL").as_deref(),
+            env("JENKINS_UC").as_deref(),
+            jenkins_version,
+        )?;
+        let experimental_url = env("JPM_UC_EXPERIMENTAL_URL")
+            .or_else(|| env("JENKINS_UC_EXPERIMENTAL").map(|uc| update_center_json_url(&uc)))
+            .unwrap_or_else(|| UC_EXPERIMENTAL_URL.to_string());
+        let plugin_versions_url = env("JPM_UC_PLUGIN_VERSIONS_URL")
+            .or_else(|| env("JENKINS_PLUGIN_INFO"))
+            .unwrap_or_else(|| UC_PLUGIN_VERSIONS_URL.to_string());
 
-        let stable_url = format!("{stable_base}{jenkins_version}");
         let stable_cache = cache_dir.join(format!("uc-{jenkins_version}.json"));
         let experimental_cache = cache_dir.join("uc-experimental.json");
         let plugin_versions_cache = cache_dir.join("plugin-versions.json");
@@ -217,6 +223,48 @@ mod tests {
     }
 
     #[test]
+    fn stable_url_prefers_jpm_prefix_then_jenkins_uc() {
+        assert_eq!(
+            stable_url(None, None, "2.452.4").unwrap(),
+            "https://updates.jenkins.io/update-center.actual.json?version=2.452.4"
+        );
+        assert_eq!(
+            stable_url(Some("http://x/uc?version="), Some("http://y"), "2.452.4").unwrap(),
+            "http://x/uc?version=2.452.4"
+        );
+        assert_eq!(
+            stable_url(None, Some("https://mirror.example/jenkins/"), "2.452.4").unwrap(),
+            "https://mirror.example/jenkins/update-center.json?version=2.452.4"
+        );
+        assert_eq!(
+            stable_url(
+                None,
+                Some("https://mirror.example/uc.actual.json?site=a"),
+                "2.452.4"
+            )
+            .unwrap(),
+            "https://mirror.example/uc.actual.json?site=a&version=2.452.4"
+        );
+        assert!(stable_url(None, Some("not a url"), "2.452.4").is_err());
+    }
+
+    #[test]
+    fn update_center_json_url_appends_file_to_base_urls() {
+        assert_eq!(
+            update_center_json_url("https://updates.jenkins.io"),
+            "https://updates.jenkins.io/update-center.json"
+        );
+        assert_eq!(
+            update_center_json_url("https://m.example/experimental/update-center.actual.json"),
+            "https://m.example/experimental/update-center.actual.json"
+        );
+        assert_eq!(
+            update_center_json_url("https://m.example/jenkins/?token=x"),
+            "https://m.example/jenkins/update-center.json?token=x"
+        );
+    }
+
+    #[test]
     fn format_age_picks_largest_unit() {
         assert_eq!(format_age(Duration::from_secs(42)), "42s");
         assert_eq!(format_age(Duration::from_secs(150)), "2m");
@@ -244,6 +292,46 @@ fn parse_deps(deps: &Value) -> Vec<(String, String, bool)> {
             Some((name, version, optional))
         })
         .collect()
+}
+
+/// URL of the stable Update Center for `jenkins_version`.
+///
+/// - `JPM_UC_STABLE_URL` is a prefix the version is appended to.
+/// - `JENKINS_UC` (plugin-installation-manager-tool) is either a `.json` URL
+///   or a base URL that `/update-center.json` is appended to; the version is
+///   added as a `version` query parameter.
+fn stable_url(
+    jpm_prefix: Option<&str>,
+    jenkins_uc: Option<&str>,
+    jenkins_version: &str,
+) -> Result<String> {
+    if let Some(prefix) = jpm_prefix {
+        return Ok(format!("{prefix}{jenkins_version}"));
+    }
+    let Some(uc) = jenkins_uc else {
+        return Ok(format!("{UC_STABLE_URL}{jenkins_version}"));
+    };
+    let url = update_center_json_url(uc);
+    let mut parsed =
+        reqwest::Url::parse(&url).with_context(|| format!("invalid JENKINS_UC URL '{url}'"))?;
+    parsed
+        .query_pairs_mut()
+        .append_pair("version", jenkins_version);
+    Ok(parsed.into())
+}
+
+/// Like plugin-installation-manager-tool: a URL whose path does not end in
+/// `json` is a base URL, so `/update-center.json` is appended to the path.
+/// Strings that are not URLs are returned unchanged.
+pub fn update_center_json_url(uc: &str) -> String {
+    match reqwest::Url::parse(uc) {
+        Ok(mut url) if !url.path().ends_with("json") => {
+            let path = format!("{}/update-center.json", url.path().trim_end_matches('/'));
+            url.set_path(&path);
+            url.into()
+        }
+        _ => uc.to_string(),
+    }
 }
 
 /// Fetch JSON from `url`, returning a cached copy if it exists and is fresh.
