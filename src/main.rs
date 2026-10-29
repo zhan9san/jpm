@@ -104,6 +104,15 @@ struct InstallArgs {
     /// Print what would be installed without downloading anything.
     #[arg(long)]
     dry_run: bool,
+
+    /// Maximum number of plugins to download at the same time.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 8,
+        value_parser = clap::value_parser!(u16).range(1..)
+    )]
+    concurrency: u16,
 }
 
 // ── jpm doctor ────────────────────────────────────────────────────────────────
@@ -423,6 +432,7 @@ async fn run_install(client: &reqwest::Client, args: InstallArgs) -> Result<()> 
             plugin_dir: args.plugin_dir,
             skip_failed: args.skip_failed,
             dry_run: args.dry_run,
+            concurrency: usize::from(args.concurrency),
         },
     )
     .await
