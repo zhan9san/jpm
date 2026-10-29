@@ -4,6 +4,7 @@ mod doctor;
 mod graph;
 mod installer;
 mod lockfile;
+mod manifest;
 mod parser;
 mod resolver;
 mod roots;

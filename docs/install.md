@@ -139,6 +139,11 @@ file with a bad checksum into the plugin directory.
 If the lock file entry has no `sha256` (e.g. a bundled-only plugin), skip
 verification and warn.
 
+Then open the file as a ZIP and read `META-INF/MANIFEST.MF`. The download is
+rejected unless it is a valid archive whose `Short-Name` (when present) and
+`Plugin-Version` match the lock entry. This catches a mirror answering with
+an HTML error page even when there is no checksum to compare.
+
 ### 6. Atomic move to plugin directory
 
 Once verified, move the temp file to its final location:
